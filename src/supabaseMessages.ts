@@ -26,8 +26,11 @@ type SupabaseMessageService = {
   isConfigured: boolean;
   missingEnvKeys: string[];
   start: () => Promise<void>;
+  refresh: () => Promise<void>;
   stop: () => Promise<void>;
 };
+
+const SUPABASE_MESSAGE_BATCH_SIZE = 100;
 
 const getMissingSupabaseEnvKeys = (): string[] =>
   [SUPABASE_URL_ENV, SUPABASE_PUBLISHABLE_KEY_ENV].filter(
@@ -45,6 +48,7 @@ export const createSupabaseMessageService = ({
       isConfigured: false,
       missingEnvKeys,
       start: async () => undefined,
+      refresh: async () => undefined,
       stop: async () => undefined,
     };
   }
@@ -88,22 +92,32 @@ export const createSupabaseMessageService = ({
   };
 
   const loadUnreadMessages = async (): Promise<void> => {
-    const { data, error } = await supabase
-      .from(SUPABASE_MESSAGES_TABLE)
-      .select('id, sender_name, message, created_at, is_read, source, task_id')
-      .eq('is_read', false)
-      .order('created_at', {
-        ascending: true,
-      })
-      .limit(25);
+    let hasMoreUnreadMessages = true;
 
-    if (error) {
-      onError('Supabase unread messages could not be loaded.', error);
-      return;
-    }
+    while (hasMoreUnreadMessages) {
+      const { data, error } = await supabase
+        .from(SUPABASE_MESSAGES_TABLE)
+        .select('id, sender_name, message, created_at, is_read, source, task_id')
+        .eq('is_read', false)
+        .order('created_at', {
+          ascending: true,
+        })
+        .limit(SUPABASE_MESSAGE_BATCH_SIZE);
 
-    for (const row of data ?? []) {
-      await handleIncomingMessage(row as SupabaseMessageRow);
+      if (error) {
+        onError('Supabase unread messages could not be loaded.', error);
+        return;
+      }
+
+      if (!data?.length) {
+        return;
+      }
+
+      for (const row of data) {
+        await handleIncomingMessage(row as SupabaseMessageRow);
+      }
+
+      hasMoreUnreadMessages = data.length === SUPABASE_MESSAGE_BATCH_SIZE;
     }
   };
 
@@ -140,6 +154,9 @@ export const createSupabaseMessageService = ({
             onError('Supabase realtime subscription timed out.');
           }
         });
+    },
+    refresh: async () => {
+      await loadUnreadMessages();
     },
     stop: async () => {
       handledMessageIds.clear();

@@ -1026,7 +1026,7 @@ textarea {
 .reminder-popup {
   height: 100%;
   display: grid;
-  grid-template-rows: 1fr auto;
+  grid-template-rows: minmax(0, 1fr) auto;
   gap: 20px;
   padding: 20px;
   overflow: hidden;
@@ -1038,6 +1038,9 @@ textarea {
 .reminder-popup-copy {
   display: grid;
   gap: 8px;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 6px;
 }
 
 .reminder-popup-subject {

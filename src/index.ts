@@ -1,3 +1,4 @@
+import os from 'node:os';
 import { randomUUID } from 'node:crypto';
 import {
   app,
@@ -36,6 +37,9 @@ import {
   getSelectionFromSharedTaskId,
   type SupabaseSharedTaskService,
 } from './supabaseSharedTasks';
+import {
+  createSupabasePresenceService,
+} from './supabasePresence';
 import type {
   AppSelection,
   HistoryDayPayload,
@@ -99,6 +103,9 @@ const REMINDER_POPUP_WIDTH = 520;
 const REMINDER_POPUP_HEIGHT = 320;
 const REMINDER_POPUP_MARGIN = 18;
 const REMINDER_POPUP_STACK_GAP = 18;
+const SUPABASE_PRESENCE_HEARTBEAT_INTERVAL_MS = 30_000;
+const SUPABASE_PRESENCE_DEVICE_ID_ENV = 'SUPABASE_PRESENCE_DEVICE_ID';
+const SUPABASE_PRESENCE_DEVICE_NAME_ENV = 'SUPABASE_PRESENCE_DEVICE_NAME';
 
 const taskStore = new Store<Record<string, unknown>>({
   name: 'tasks',
@@ -121,7 +128,10 @@ let isQuitting = false;
 let pendingSelection: AppSelection | null = null;
 let reminderPopupWindows: ReminderPopupWindowEntry[] = [];
 let supabaseMessageServiceStop: (() => Promise<void>) | null = null;
+let supabaseMessageServiceRefresh: (() => Promise<void>) | null = null;
 let supabaseSharedTaskService: SupabaseSharedTaskService | null = null;
+let supabasePresenceServiceHeartbeat: (() => Promise<void>) | null = null;
+let supabasePresenceServiceStop: (() => Promise<void>) | null = null;
 
 app.setAppUserModelId(APP_USER_MODEL_ID);
 app.name = APP_NAME;
@@ -167,6 +177,33 @@ const normalizeOptionalText = (value?: string | null): string | undefined => {
   const trimmedValue = value?.trim();
   return trimmedValue ? trimmedValue : undefined;
 };
+
+const getStoredStringValue = (key: string): string | undefined => {
+  const value = taskStoreAccess.get(key, '');
+  return typeof value === 'string' ? normalizeOptionalText(value) : undefined;
+};
+
+const getSupabasePresenceDeviceId = (): string => {
+  const configuredDeviceId = normalizeOptionalText(process.env[SUPABASE_PRESENCE_DEVICE_ID_ENV]);
+
+  if (configuredDeviceId) {
+    return configuredDeviceId;
+  }
+
+  const storedDeviceId = getStoredStringValue('supabasePresenceDeviceId');
+
+  if (storedDeviceId) {
+    return storedDeviceId;
+  }
+
+  const generatedDeviceId = `laptop-${randomUUID()}`;
+  taskStoreAccess.set('supabasePresenceDeviceId', generatedDeviceId);
+  return generatedDeviceId;
+};
+
+const getSupabasePresenceDeviceName = (): string =>
+  normalizeOptionalText(process.env[SUPABASE_PRESENCE_DEVICE_NAME_ENV]) ??
+  `${os.hostname()} (${APP_NAME})`;
 
 const normalizeTitle = (value: string): string => {
   const trimmedValue = value.trim();
@@ -1560,6 +1597,7 @@ const startSupabaseMessageFeed = async (): Promise<void> => {
   }
 
   await service.start();
+  supabaseMessageServiceRefresh = () => service.refresh();
   supabaseMessageServiceStop = () => service.stop();
 };
 
@@ -1584,6 +1622,30 @@ const startSupabaseSharedTaskFeed = async (): Promise<void> => {
     tasks: listTasks(),
     routines: listRoutines(),
   });
+};
+
+const startSupabasePresenceFeed = async (): Promise<void> => {
+  const service = createSupabasePresenceService({
+    deviceId: getSupabasePresenceDeviceId(),
+    deviceName: getSupabasePresenceDeviceName(),
+    heartbeatIntervalMs: SUPABASE_PRESENCE_HEARTBEAT_INTERVAL_MS,
+    onError: (message, error) => {
+      console.error(message, error);
+    },
+  });
+
+  if (!service.isConfigured) {
+    console.warn(
+      `Supabase app presence is disabled. Missing env vars: ${service.missingEnvKeys.join(', ')}`,
+    );
+    supabasePresenceServiceHeartbeat = null;
+    supabasePresenceServiceStop = null;
+    return;
+  }
+
+  await service.start();
+  supabasePresenceServiceHeartbeat = () => service.heartbeat();
+  supabasePresenceServiceStop = () => service.stop();
 };
 
 const checkDueReminders = async (): Promise<void> => {
@@ -1768,8 +1830,15 @@ app.on('will-quit', () => {
     void supabaseMessageServiceStop();
     supabaseMessageServiceStop = null;
   }
+  supabaseMessageServiceRefresh = null;
 
   supabaseSharedTaskService = null;
+
+  if (supabasePresenceServiceStop) {
+    void supabasePresenceServiceStop();
+    supabasePresenceServiceStop = null;
+  }
+  supabasePresenceServiceHeartbeat = null;
 });
 
 app.on('window-all-closed', () => {
@@ -1783,11 +1852,20 @@ void app.whenReady().then(() => {
   getLiveState();
   void startSupabaseMessageFeed();
   void startSupabaseSharedTaskFeed();
+  void startSupabasePresenceFeed();
   screen.on('display-added', repositionReminderPopups);
   screen.on('display-removed', repositionReminderPopups);
   screen.on('display-metrics-changed', repositionReminderPopups);
 
   powerMonitor.on('resume', () => {
+    if (supabaseMessageServiceRefresh) {
+      void supabaseMessageServiceRefresh();
+    }
+
+    if (supabasePresenceServiceHeartbeat) {
+      void supabasePresenceServiceHeartbeat();
+    }
+
     void checkDueReminders();
   });
 

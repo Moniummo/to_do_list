@@ -3735,6 +3735,21 @@ function ReminderPopupScreen() {
   }, []);
 
   useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        void window.todoApp.app.closeCurrentWindow();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, []);
+
+  useEffect(() => {
     setResolvedSubject(payload?.title ?? '');
     setResolvedSender(payload?.contextValue ?? '');
 
