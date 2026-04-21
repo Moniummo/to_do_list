@@ -123,6 +123,14 @@ type ErrorBoundaryState = {
   errorMessage: string | null;
 };
 
+type ReminderPopupPayload = {
+  title: string;
+  body: string;
+  selection?: AppSelection;
+  contextLabel?: string;
+  contextValue?: string;
+};
+
 type PickerChoice = {
   label: string;
   value: string;
@@ -555,6 +563,110 @@ const isRoutineForToday = (item: RoutineListItem): boolean => {
     currentOccurrence.scheduledDate,
     toLocalDateString(new Date()),
   ) <= 0;
+};
+
+const isTaskForLater = (task: Task): boolean => {
+  if (task.status !== 'pending' || !task.dueAt) {
+    return false;
+  }
+
+  return compareLocalDateStrings(
+    toLocalDateString(new Date(task.dueAt)),
+    toLocalDateString(new Date()),
+  ) > 0;
+};
+
+const isRoutineForLater = (item: RoutineListItem): boolean => {
+  const currentOccurrence = item.currentOccurrence;
+
+  if (!currentOccurrence || currentOccurrence.status !== 'pending') {
+    return false;
+  }
+
+  return compareLocalDateStrings(
+    currentOccurrence.scheduledDate,
+    toLocalDateString(new Date()),
+  ) > 0;
+};
+
+const getHashRoute = (): string => {
+  const rawHash = window.location.hash.startsWith('#')
+    ? window.location.hash.slice(1)
+    : window.location.hash;
+
+  return rawHash.split('?')[0] ?? '';
+};
+
+const getReminderPopupPayload = (): ReminderPopupPayload | null => {
+  const rawHash = window.location.hash.startsWith('#')
+    ? window.location.hash.slice(1)
+    : window.location.hash;
+  const queryIndex = rawHash.indexOf('?');
+
+  if (queryIndex === -1) {
+    return null;
+  }
+
+  const params = new URLSearchParams(rawHash.slice(queryIndex + 1));
+  const encodedPayload = params.get('payload');
+
+  if (!encodedPayload) {
+    return null;
+  }
+
+  try {
+    const parsedPayload = JSON.parse(encodedPayload) as {
+      title?: unknown;
+      body?: unknown;
+      selection?: unknown;
+      contextLabel?: unknown;
+      contextValue?: unknown;
+    };
+
+    if (
+      typeof parsedPayload.title !== 'string' ||
+      typeof parsedPayload.body !== 'string'
+    ) {
+      return null;
+    }
+
+    const selectionCandidate = parsedPayload.selection;
+    const selection =
+      selectionCandidate &&
+      typeof selectionCandidate === 'object' &&
+      selectionCandidate !== null &&
+      'kind' in selectionCandidate &&
+      'id' in selectionCandidate
+        ? (() => {
+            const nextSelection = selectionCandidate as {
+              kind?: unknown;
+              id?: unknown;
+            };
+
+            return (nextSelection.kind === 'task' ||
+              nextSelection.kind === 'routine') &&
+              typeof nextSelection.id === 'string'
+              ? (nextSelection as AppSelection)
+              : undefined;
+          })()
+        : undefined;
+
+    return {
+      title: parsedPayload.title,
+      body: parsedPayload.body,
+      selection,
+      contextLabel:
+        typeof parsedPayload.contextLabel === 'string'
+          ? parsedPayload.contextLabel
+          : undefined,
+      contextValue:
+        typeof parsedPayload.contextValue === 'string'
+          ? parsedPayload.contextValue
+          : undefined,
+    };
+  } catch (_error) {
+    return null;
+  }
 };
 
 const buildWeeklyPlan = (
@@ -1943,6 +2055,25 @@ function MainScreen() {
       ? 'Set up tasks that automatically reset themselves when the next cycle arrives.'
       : 'Look back at passive task completions and routine streaks in one place.';
 
+  const handlePreviewReminder = async () => {
+    setError(null);
+
+    try {
+      await window.todoApp.app.previewReminderPopup();
+    } catch (previewError) {
+      const previewMessage = getErrorMessage(previewError);
+
+      if (previewMessage.includes("No handler registered for 'app:previewReminderPopup'")) {
+        setError(
+          'Preview popup needs one full app restart because it is created by Electron main process code. Close and reopen the app, then try Preview reminder again.',
+        );
+        return;
+      }
+
+      setError(previewMessage);
+    }
+  };
+
   return (
     <main className="app-shell">
       <div className="desktop-frame">
@@ -2042,6 +2173,15 @@ function MainScreen() {
             </div>
 
             <div className="header-actions">
+              <button
+                className="soft-button"
+                type="button"
+                onClick={() => {
+                  void handlePreviewReminder();
+                }}
+              >
+                Preview reminder
+              </button>
               <button
                 className="soft-button primary"
                 type="button"
@@ -2897,6 +3037,7 @@ function MiniWindowScreen() {
     createEmptyMiniComposer(),
   );
   const [showTimingOptions, setShowTimingOptions] = useState(false);
+  const [showLaterItems, setShowLaterItems] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -3100,6 +3241,8 @@ function MiniWindowScreen() {
 
   const todayTasks = tasks.filter(isTaskForToday);
   const todayRoutines = routines.filter(isRoutineForToday);
+  const laterTasks = tasks.filter(isTaskForLater);
+  const laterRoutines = routines.filter(isRoutineForLater);
   const today = toLocalDateString(new Date());
   const completedTodayTasks = tasks.filter(
     (task) => task.status === 'completed' && getCompletedTaskDate(task) === today,
@@ -3111,47 +3254,57 @@ function MiniWindowScreen() {
       getCompletedLocalDate(currentOccurrence.completedAt) === today
     );
   });
+  const buildMiniTaskItem = (task: Task) => {
+    const priorityDetails = getTaskPriorityDetails(task);
+
+    return {
+      key: `task-${task.id}`,
+      title: task.title,
+      meta: joinMeta(
+        priorityDetails.label,
+        formatDateTime(task.dueAt) ? `Due ${formatDateTime(task.dueAt)}` : 'No deadline',
+      ),
+      rank: priorityDetails.rank,
+      sortDate: task.dueAt ?? task.createdAt,
+      onToggle: () => handleCompleteTask(task.id),
+      onDelete: () => handleDeleteTask(task.id),
+    };
+  };
+  const buildMiniRoutineItem = (item: RoutineListItem) => {
+    const priorityDetails = getRoutinePriorityDetails({
+      priority: item.template.priority,
+      currentOccurrence: item.currentOccurrence,
+    });
+
+    return {
+      key: `routine-${item.template.id}`,
+      title: item.template.title,
+      meta: joinMeta(
+        priorityDetails.label,
+        formatRoutineRule(item.template.rule),
+        formatDateTime(item.currentOccurrence?.dueAt)
+          ? `Due ${formatDateTime(item.currentOccurrence?.dueAt)}`
+          : 'Due by end of day',
+      ),
+      rank: priorityDetails.rank,
+      sortDate: item.currentOccurrence?.dueAt ?? item.template.createdAt,
+      onToggle: () => handleCompleteRoutine(item.template.id),
+      onDelete: () => handleDeleteRoutine(item.template.id),
+    };
+  };
   const activeItems = [
     ...todayTasks.map((task) => {
-      const priorityDetails = getTaskPriorityDetails(task);
-
-      return {
-        key: `task-${task.id}`,
-        title: task.title,
-        meta: joinMeta(
-          priorityDetails.label,
-          formatDateTime(task.dueAt) ? `Due ${formatDateTime(task.dueAt)}` : 'No deadline',
-        ),
-        rank: priorityDetails.rank,
-        sortDate: task.dueAt ?? task.createdAt,
-        isCompleted: false,
-        onToggle: () => handleCompleteTask(task.id),
-        onDelete: () => handleDeleteTask(task.id),
-      };
+      return buildMiniTaskItem(task);
     }),
     ...todayRoutines.map((item) => {
-      const priorityDetails = getRoutinePriorityDetails({
-        priority: item.template.priority,
-        currentOccurrence: item.currentOccurrence,
-      });
-
-      return {
-        key: `routine-${item.template.id}`,
-        title: item.template.title,
-        meta: joinMeta(
-          priorityDetails.label,
-          formatRoutineRule(item.template.rule),
-          formatDateTime(item.currentOccurrence?.dueAt)
-            ? `Due ${formatDateTime(item.currentOccurrence?.dueAt)}`
-            : 'Due by end of day',
-        ),
-        rank: priorityDetails.rank,
-        sortDate: item.currentOccurrence?.dueAt ?? item.template.createdAt,
-        isCompleted: false,
-        onToggle: () => handleCompleteRoutine(item.template.id),
-        onDelete: () => handleDeleteRoutine(item.template.id),
-      };
+      return buildMiniRoutineItem(item);
     }),
+    ...(showLaterItems
+      ? [
+          ...laterTasks.map((task) => buildMiniTaskItem(task)),
+          ...laterRoutines.map((item) => buildMiniRoutineItem(item)),
+        ]
+      : []),
   ].sort((left, right) => {
     if (left.rank !== right.rank) {
       return left.rank - right.rank;
@@ -3163,6 +3316,7 @@ function MiniWindowScreen() {
 
     return left.title.localeCompare(right.title);
   });
+  const laterItemsCount = laterTasks.length + laterRoutines.length;
   const completedItems = [
     ...completedTodayTasks.map((task) => {
       const priorityDetails = getTaskPriorityDetails(task);
@@ -3455,14 +3609,33 @@ function MiniWindowScreen() {
 
         <div className="mini-section">
           <div className="mini-section-head">
-            <h2>Active tasks</h2>
+            <div className="mini-section-title">
+              <h2>Active tasks</h2>
+              {laterItemsCount ? (
+                <button
+                  className="link-button mini-toggle-link"
+                  type="button"
+                  onClick={() => setShowLaterItems((current) => !current)}
+                >
+                  {showLaterItems
+                    ? `Hide later (${laterItemsCount})`
+                    : `Show later (${laterItemsCount})`}
+                </button>
+              ) : null}
+            </div>
             <span className="status-chip accent">{activeItems.length}</span>
           </div>
 
           {isLoading ? (
             <p className="empty-state">Loading active tasks...</p>
           ) : activeItems.length === 0 ? (
-            <p className="empty-state">Nothing active right now.</p>
+            <p className="empty-state">
+              {laterItemsCount
+                ? `Nothing urgent right now. ${laterItemsCount} later item${
+                    laterItemsCount === 1 ? '' : 's'
+                  } ${showLaterItems ? 'is' : 'are'} ${showLaterItems ? 'already shown above.' : 'hidden for now.'}`
+                : 'Nothing active right now.'}
+            </p>
           ) : (
             <div className="mini-list">
               {activeItems.map((item) => (
@@ -3548,10 +3721,122 @@ function MiniWindowScreen() {
   );
 }
 
+function ReminderPopupScreen() {
+  const payload = getReminderPopupPayload();
+  const [resolvedSubject, setResolvedSubject] = useState<string>(() => payload?.title ?? '');
+  const [resolvedSender, setResolvedSender] = useState<string>(() => payload?.contextValue ?? '');
+  const reminderType =
+    payload?.contextLabel ?? (payload?.selection ? 'Task Reminder' : 'General Reminder');
+  const messageContent =
+    payload?.body ?? 'The reminder popup opened, but the message did not load correctly.';
+
+  useEffect(() => {
+    document.title = 'Reminder';
+  }, []);
+
+  useEffect(() => {
+    setResolvedSubject(payload?.title ?? '');
+    setResolvedSender(payload?.contextValue ?? '');
+
+    if (!payload?.selection || payload.title.trim()) {
+      return;
+    }
+
+    let isActive = true;
+
+    const resolveSelectionSubject = async () => {
+      try {
+        if (payload.selection.kind === 'task') {
+          const tasks = await window.todoApp.tasks.list();
+          const taskTitle =
+            tasks.find((task) => task.id === payload.selection?.id)?.title?.trim() ?? '';
+
+          if (isActive && taskTitle) {
+            setResolvedSubject(taskTitle);
+          }
+
+          return;
+        }
+
+        const routines = await window.todoApp.routines.list();
+        const routineTitle =
+          routines.find((item) => item.template.id === payload.selection?.id)?.template.title?.trim() ??
+          '';
+
+        if (isActive && routineTitle) {
+          setResolvedSubject(routineTitle);
+        }
+      } catch (_error) {
+        // Keep the popup usable even if subject lookup fails.
+      }
+    };
+
+    void resolveSelectionSubject();
+
+    return () => {
+      isActive = false;
+    };
+  }, [payload]);
+
+  const handleDismiss = async () => {
+    await window.todoApp.app.closeCurrentWindow();
+  };
+
+  const handleOpen = async () => {
+    if (payload?.selection) {
+      await window.todoApp.app.showSelection(payload.selection);
+    } else {
+      await window.todoApp.app.show();
+    }
+
+    await window.todoApp.app.closeCurrentWindow();
+  };
+
+  return (
+    <main className="reminder-popup-shell">
+      <section className="reminder-popup">
+        <div className="reminder-popup-copy">
+          <p className="section-kicker">{reminderType}</p>
+          <h1 className={`reminder-popup-subject${resolvedSubject ? '' : ' is-empty'}`}>
+            {resolvedSubject || '\u00A0'}
+          </h1>
+          <p className="reminder-popup-field-label">Sender:</p>
+          <p className={`reminder-popup-field-value${resolvedSender ? '' : ' is-empty'}`}>
+            {resolvedSender || '\u00A0'}
+          </p>
+          <p className="reminder-popup-field-label">Message:</p>
+          <p className="reminder-popup-body">{messageContent}</p>
+        </div>
+
+        <div className="reminder-popup-actions">
+          <button className="soft-button primary" type="button" onClick={() => void handleOpen()}>
+            {payload?.selection
+              ? payload.selection.kind === 'routine'
+                ? 'Open routine'
+                : 'Open task'
+              : 'Open app'}
+          </button>
+          <button className="soft-button" type="button" onClick={() => void handleDismiss()}>
+            Dismiss
+          </button>
+        </div>
+      </section>
+    </main>
+  );
+}
+
 export default function App() {
+  const hashRoute = getHashRoute();
+
   return (
     <AppErrorBoundary>
-      {window.location.hash === '#quick-add' ? <MiniWindowScreen /> : <MainScreen />}
+      {hashRoute === 'quick-add' ? (
+        <MiniWindowScreen />
+      ) : hashRoute === 'reminder-popup' ? (
+        <ReminderPopupScreen />
+      ) : (
+        <MainScreen />
+      )}
     </AppErrorBoundary>
   );
 }

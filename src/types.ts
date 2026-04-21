@@ -163,6 +163,9 @@ export interface TodoAppApi {
   };
   app: {
     show: () => Promise<void>;
+    showSelection: (selection: AppSelection) => Promise<void>;
+    previewReminderPopup: () => Promise<void>;
+    closeCurrentWindow: () => Promise<void>;
     onSelection: (listener: (selection: AppSelection) => void) => () => void;
   };
   quickAdd: {

@@ -229,6 +229,11 @@ textarea {
   align-items: flex-start;
 }
 
+.header-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .main-header {
   padding-bottom: 12px;
   border-bottom: 1px solid var(--line);
@@ -887,6 +892,11 @@ textarea {
   font-size: 0.98rem;
 }
 
+.mini-section-title {
+  display: grid;
+  gap: 4px;
+}
+
 .mini-section {
   display: grid;
   gap: 10px;
@@ -966,6 +976,11 @@ textarea {
   flex: 1 1 auto;
 }
 
+.mini-toggle-link {
+  justify-self: start;
+  font-size: 0.84rem;
+}
+
 .mini-delete {
   border: 1px solid var(--line);
   border-radius: 999px;
@@ -1000,6 +1015,77 @@ textarea {
 .error-screen {
   max-width: 720px;
   margin: 0 auto;
+}
+
+.reminder-popup-shell {
+  height: 100%;
+  padding: 0;
+  overflow: hidden;
+}
+
+.reminder-popup {
+  height: 100%;
+  display: grid;
+  grid-template-rows: 1fr auto;
+  gap: 20px;
+  padding: 20px;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at top right, rgba(201, 58, 82, 0.16), transparent 34%),
+    linear-gradient(180deg, rgba(28, 14, 33, 0.98), rgba(15, 10, 17, 0.98));
+}
+
+.reminder-popup-copy {
+  display: grid;
+  gap: 8px;
+}
+
+.reminder-popup-subject {
+  margin: 0;
+  font-size: 1.28rem;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+  min-height: 1.6em;
+}
+
+.reminder-popup-subject.is-empty,
+.reminder-popup-field-value.is-empty {
+  color: rgba(255, 230, 236, 0.4);
+}
+
+.reminder-popup-field-label {
+  margin: 10px 0 0;
+  color: rgba(255, 219, 227, 0.92);
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.reminder-popup-field-value {
+  margin: 0;
+  font-size: 1rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.reminder-popup-body {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.reminder-popup-actions {
+  display: flex;
+  gap: 12px;
+  justify-content: flex-end;
+  margin-top: auto;
+}
+
+.reminder-popup-actions .soft-button {
+  flex: 1 1 0;
 }
 
 @media (max-width: 980px) {

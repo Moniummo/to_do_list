@@ -6,8 +6,8 @@ import {
   ipcMain,
   Menu,
   nativeImage,
-  Notification,
   powerMonitor,
+  screen,
   Tray,
 } from 'electron';
 import Store from 'electron-store';
@@ -27,6 +27,15 @@ import {
   getTaskPriorityDetails,
   normalizeTaskPriority,
 } from './taskPriority';
+import {
+  createSupabaseMessageService,
+  type SupabaseMessageRow,
+} from './supabaseMessages';
+import {
+  createSupabaseSharedTaskService,
+  getSelectionFromSharedTaskId,
+  type SupabaseSharedTaskService,
+} from './supabaseSharedTasks';
 import type {
   AppSelection,
   HistoryDayPayload,
@@ -81,9 +90,15 @@ const APP_USER_MODEL_ID = 'com.arkave.todolist';
 const APP_NAME = 'To Do List';
 const MINI_WINDOW_SHORTCUT = 'CommandOrControl+Shift+A';
 const QUICK_ADD_HASH = '#quick-add';
-const REMINDER_CHECK_INTERVAL_MS = 30_000;
+const REMINDER_POPUP_HASH = '#reminder-popup';
+const REMINDER_CHECK_INTERVAL_MS = 10_000;
 const WINDOW_BACKGROUND = '#130613';
 const QUICK_ADD_BACKGROUND = '#180818';
+const REMINDER_POPUP_BACKGROUND = '#160913';
+const REMINDER_POPUP_WIDTH = 520;
+const REMINDER_POPUP_HEIGHT = 320;
+const REMINDER_POPUP_MARGIN = 18;
+const REMINDER_POPUP_STACK_GAP = 18;
 
 const taskStore = new Store<Record<string, unknown>>({
   name: 'tasks',
@@ -104,6 +119,9 @@ let tray: Tray | null = null;
 let reminderInterval: NodeJS.Timeout | null = null;
 let isQuitting = false;
 let pendingSelection: AppSelection | null = null;
+let reminderPopupWindows: ReminderPopupWindowEntry[] = [];
+let supabaseMessageServiceStop: (() => Promise<void>) | null = null;
+let supabaseSharedTaskService: SupabaseSharedTaskService | null = null;
 
 app.setAppUserModelId(APP_USER_MODEL_ID);
 app.name = APP_NAME;
@@ -117,6 +135,33 @@ const reminderFormatter = new Intl.DateTimeFormat(undefined, {
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null;
+
+const isStoredWindowBounds = (value: unknown): value is StoredWindowBounds =>
+  isRecord(value) &&
+  typeof value.x === 'number' &&
+  typeof value.y === 'number' &&
+  typeof value.width === 'number' &&
+  typeof value.height === 'number';
+
+type StoredWindowBounds = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+type ReminderPopupPayload = {
+  title: string;
+  body: string;
+  selection?: AppSelection;
+  contextLabel?: string;
+  contextValue?: string;
+};
+
+type ReminderPopupWindowEntry = {
+  window: BrowserWindow;
+  displayId: number;
+};
 
 const normalizeOptionalText = (value?: string | null): string | undefined => {
   const trimmedValue = value?.trim();
@@ -262,6 +307,19 @@ const getNotifiedReminders = (): Record<string, string> => {
   return isRecord(reminders) ? (reminders as Record<string, string>) : {};
 };
 
+const getQuickAddBounds = (): StoredWindowBounds | undefined => {
+  const nextBounds = taskStoreAccess.get('quickAddBounds', undefined);
+  return isStoredWindowBounds(nextBounds) ? nextBounds : undefined;
+};
+
+const persistQuickAddBounds = (window: BrowserWindow): void => {
+  if (window.isDestroyed()) {
+    return;
+  }
+
+  taskStoreAccess.set('quickAddBounds', window.getBounds());
+};
+
 const getState = (): PersistedState => ({
   schemaVersion: CURRENT_SCHEMA_VERSION,
   oneOffTasks: getLegacyOrCurrentTasks(),
@@ -349,6 +407,13 @@ const persistState = (
 
   if (options.broadcast) {
     broadcastDataChange();
+  }
+
+  if (supabaseSharedTaskService) {
+    supabaseSharedTaskService.scheduleSync({
+      tasks: nextState.oneOffTasks,
+      routines: buildRoutineListItems(nextState),
+    });
   }
 
   return nextState;
@@ -1162,9 +1227,10 @@ const createMainWindow = (): BrowserWindow => {
 };
 
 const createQuickAddWindow = (): BrowserWindow => {
+  const savedBounds = getQuickAddBounds();
   const window = new BrowserWindow({
-    width: 430,
-    height: 640,
+    width: savedBounds?.width ?? 430,
+    height: savedBounds?.height ?? 640,
     minWidth: 400,
     maxWidth: 520,
     minHeight: 560,
@@ -1176,6 +1242,8 @@ const createQuickAddWindow = (): BrowserWindow => {
     skipTaskbar: true,
     backgroundColor: QUICK_ADD_BACKGROUND,
     title: 'Quick Add',
+    x: savedBounds?.x,
+    y: savedBounds?.y,
     webPreferences: {
       preload: MAIN_WINDOW_PRELOAD_WEBPACK_ENTRY,
     },
@@ -1184,9 +1252,24 @@ const createQuickAddWindow = (): BrowserWindow => {
   window.loadURL(`${MAIN_WINDOW_WEBPACK_ENTRY}${QUICK_ADD_HASH}`);
 
   window.once('ready-to-show', () => {
-    window.center();
+    if (!savedBounds) {
+      window.center();
+    }
+
     window.show();
     window.focus();
+  });
+
+  window.on('move', () => {
+    persistQuickAddBounds(window);
+  });
+
+  window.on('close', (event) => {
+    if (!isQuitting) {
+      event.preventDefault();
+      persistQuickAddBounds(window);
+      window.hide();
+    }
   });
 
   window.on('blur', () => {
@@ -1210,7 +1293,8 @@ const openQuickAddWindow = (): void => {
     return;
   }
 
-  if (quickAddWindow.isVisible() && quickAddWindow.isFocused()) {
+  if (quickAddWindow.isVisible()) {
+    persistQuickAddBounds(quickAddWindow);
     quickAddWindow.hide();
     return;
   }
@@ -1219,56 +1303,287 @@ const openQuickAddWindow = (): void => {
     quickAddWindow.restore();
   }
 
-  quickAddWindow.center();
   quickAddWindow.show();
   quickAddWindow.focus();
 };
 
-const showTaskReminder = (task: Task): void => {
-  if (!Notification.isSupported()) {
-    return;
+const buildReminderPopupUrl = (payload: ReminderPopupPayload): string =>
+  `${MAIN_WINDOW_WEBPACK_ENTRY}${REMINDER_POPUP_HASH}?payload=${encodeURIComponent(
+    JSON.stringify(payload),
+  )}`;
+
+const clampReminderPopupCoordinate = (
+  value: number,
+  min: number,
+  max: number,
+): number => {
+  if (max <= min) {
+    return min;
   }
 
-  const body = task.dueAt
-    ? `${task.title}\nDue ${reminderFormatter.format(new Date(task.dueAt))}`
-    : `${task.title}\nOpen the app to take the next step.`;
-  const notification = new Notification({
-    title: 'Task reminder',
-    body,
+  return Math.min(Math.max(value, min), max);
+};
+
+const getReminderPopupDisplay = (displayId: number) =>
+  screen.getAllDisplays().find((display) => display.id === displayId) ??
+  screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+
+const getReminderPopupAnchorDisplay = () =>
+  screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+
+const repositionReminderPopups = (): void => {
+  reminderPopupWindows = reminderPopupWindows.filter(({ window }) => !window.isDestroyed());
+
+  const windowsByDisplay = new Map<number, ReminderPopupWindowEntry[]>();
+
+  reminderPopupWindows.forEach((entry) => {
+    const displayWindows = windowsByDisplay.get(entry.displayId) ?? [];
+    displayWindows.push(entry);
+    windowsByDisplay.set(entry.displayId, displayWindows);
   });
 
-  notification.on('click', () => {
-    showMainWindow({
-      kind: 'task',
-      id: task.id,
+  windowsByDisplay.forEach((entries, displayId) => {
+    const workArea = getReminderPopupDisplay(displayId).workArea;
+    const tallestPopupHeight = entries.reduce((maxHeight, { window }) => {
+      const [, height] = window.getSize();
+      return Math.max(maxHeight, height);
+    }, 0);
+    const availableStackSpace = Math.max(
+      0,
+      workArea.height - tallestPopupHeight - REMINDER_POPUP_MARGIN * 2,
+    );
+    const stackStep =
+      entries.length > 1
+        ? Math.min(
+            tallestPopupHeight + REMINDER_POPUP_STACK_GAP,
+            Math.floor(availableStackSpace / (entries.length - 1)),
+          )
+        : 0;
+
+    entries.forEach(({ window }, index) => {
+      const [width, height] = window.getSize();
+      const targetX = workArea.x + workArea.width - width - REMINDER_POPUP_MARGIN;
+      const targetY =
+        workArea.y +
+        workArea.height -
+        height -
+        REMINDER_POPUP_MARGIN -
+        index * stackStep;
+
+      window.setBounds({
+        x: clampReminderPopupCoordinate(
+          targetX,
+          workArea.x + REMINDER_POPUP_MARGIN,
+          workArea.x + workArea.width - width - REMINDER_POPUP_MARGIN,
+        ),
+        y: clampReminderPopupCoordinate(
+          targetY,
+          workArea.y + REMINDER_POPUP_MARGIN,
+          workArea.y + workArea.height - height - REMINDER_POPUP_MARGIN,
+        ),
+        width,
+        height,
+      });
     });
   });
+};
 
-  notification.show();
+const removeReminderPopupWindow = (targetWindow: BrowserWindow): void => {
+  reminderPopupWindows = reminderPopupWindows.filter(
+    ({ window }) => window !== targetWindow && !window.isDestroyed(),
+  );
+  repositionReminderPopups();
+};
+
+const showReminderPopup = (payload: ReminderPopupPayload): void => {
+  const window = new BrowserWindow({
+    width: REMINDER_POPUP_WIDTH,
+    height: REMINDER_POPUP_HEIGHT,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    frame: false,
+    show: false,
+    backgroundColor: REMINDER_POPUP_BACKGROUND,
+    title: 'Reminder',
+    webPreferences: {
+      preload: MAIN_WINDOW_PRELOAD_WEBPACK_ENTRY,
+    },
+  });
+
+  reminderPopupWindows = reminderPopupWindows.filter(
+    ({ window: popupWindow }) => !popupWindow.isDestroyed(),
+  );
+  reminderPopupWindows.unshift({
+    window,
+    displayId: getReminderPopupAnchorDisplay().id,
+  });
+  window.loadURL(buildReminderPopupUrl(payload));
+
+  window.once('ready-to-show', () => {
+    repositionReminderPopups();
+    window.show();
+    window.moveTop();
+    setTimeout(() => {
+      if (!window.isDestroyed()) {
+        repositionReminderPopups();
+      }
+    }, 0);
+  });
+
+  window.on('closed', () => {
+    removeReminderPopupWindow(window);
+  });
+};
+
+const showTaskReminder = (task: Task): void => {
+  const body = task.dueAt
+    ? `Due ${reminderFormatter.format(new Date(task.dueAt))}`
+    : 'Open the app to take the next step.';
+
+  showReminderPopup({
+    title: task.title,
+    body,
+    contextLabel: 'Task Reminder',
+    selection: {
+      kind: 'task',
+      id: task.id,
+    },
+  });
 };
 
 const showRoutineReminder = (
   routine: RoutineTemplate,
   occurrence: RoutineOccurrence,
 ): void => {
-  if (!Notification.isSupported()) {
+  showReminderPopup({
+    title: routine.title,
+    body: `Due ${reminderFormatter.format(new Date(occurrence.dueAt))}`,
+    contextLabel: 'Task Reminder',
+    selection: {
+      kind: 'routine',
+      id: routine.id,
+    },
+  });
+};
+
+const showReminderPreview = (): void => {
+  showReminderPopup({
+    title: '',
+    body: `Due ${reminderFormatter.format(new Date(Date.now() + 45 * 60_000))}\nThis is a preview of the desktop popup your reminders will use.`,
+    contextLabel: 'General Reminder',
+  });
+};
+
+const getSupabaseMessageSender = (message: SupabaseMessageRow): string | undefined => {
+  return normalizeOptionalText(message.sender_name);
+};
+
+const getSelectionDisplayTitle = (selection: AppSelection): string | undefined => {
+  const state = getLiveState();
+
+  if (selection.kind === 'task') {
+    return normalizeOptionalText(
+      state.oneOffTasks.find((task) => task.id === selection.id)?.title,
+    );
+  }
+
+  return normalizeOptionalText(
+    state.routineTemplates.find((routine) => routine.id === selection.id)?.title,
+  );
+};
+
+const getSupabaseMessageSelection = (
+  message: SupabaseMessageRow,
+): AppSelection | undefined => {
+  const sharedTaskSelection = getSelectionFromSharedTaskId(message.task_id);
+
+  if (sharedTaskSelection) {
+    return sharedTaskSelection;
+  }
+
+  if (!message.task_id) {
+    return undefined;
+  }
+
+  const state = getLiveState();
+
+  if (state.oneOffTasks.some((task) => task.id === message.task_id)) {
+    return {
+      kind: 'task',
+      id: message.task_id,
+    };
+  }
+
+  if (state.routineTemplates.some((routine) => routine.id === message.task_id)) {
+    return {
+      kind: 'routine',
+      id: message.task_id,
+    };
+  }
+
+  return undefined;
+};
+
+const getSupabaseMessagePopupPayload = (message: SupabaseMessageRow): ReminderPopupPayload => {
+  const selection = getSupabaseMessageSelection(message);
+  const selectionTitle = selection ? getSelectionDisplayTitle(selection) : undefined;
+
+  return {
+    title: selectionTitle ?? '',
+    body: message.message,
+    selection,
+    contextLabel: selection ? 'Task Reminder' : 'General Reminder',
+    contextValue: getSupabaseMessageSender(message),
+  };
+};
+
+const startSupabaseMessageFeed = async (): Promise<void> => {
+  const service = createSupabaseMessageService({
+    onMessage: (message) => {
+      showReminderPopup(getSupabaseMessagePopupPayload(message));
+    },
+    onError: (message, error) => {
+      console.error(message, error);
+    },
+  });
+
+  if (!service.isConfigured) {
+    console.warn(
+      `Supabase message feed is disabled. Missing env vars: ${service.missingEnvKeys.join(', ')}`,
+    );
+    supabaseMessageServiceStop = null;
     return;
   }
 
-  const body = `${routine.title}\nDue ${reminderFormatter.format(new Date(occurrence.dueAt))}`;
-  const notification = new Notification({
-    title: 'Routine reminder',
-    body,
+  await service.start();
+  supabaseMessageServiceStop = () => service.stop();
+};
+
+const startSupabaseSharedTaskFeed = async (): Promise<void> => {
+  const service = createSupabaseSharedTaskService({
+    onError: (message, error) => {
+      console.error(message, error);
+    },
   });
 
-  notification.on('click', () => {
-    showMainWindow({
-      kind: 'routine',
-      id: routine.id,
-    });
-  });
+  if (!service.isConfigured) {
+    console.warn(
+      `Supabase shared task sync is disabled. Missing env vars: ${service.missingEnvKeys.join(', ')}`,
+    );
+    supabaseSharedTaskService = null;
+    return;
+  }
 
-  notification.show();
+  supabaseSharedTaskService = service;
+
+  await service.start({
+    tasks: listTasks(),
+    routines: listRoutines(),
+  });
 };
 
 const checkDueReminders = async (): Promise<void> => {
@@ -1413,6 +1728,15 @@ ipcMain.handle('history:day', (_event, date: string) => getHistoryDay(date));
 ipcMain.handle('app:show', () => {
   showMainWindow();
 });
+ipcMain.handle('app:showSelection', (_event, selection: AppSelection) => {
+  showMainWindow(selection);
+});
+ipcMain.handle('app:previewReminderPopup', () => {
+  showReminderPreview();
+});
+ipcMain.handle('app:closeCurrentWindow', (event) => {
+  BrowserWindow.fromWebContents(event.sender)?.close();
+});
 ipcMain.handle('quickAdd:open', () => {
   openQuickAddWindow();
 });
@@ -1432,6 +1756,20 @@ app.on('will-quit', () => {
     clearInterval(reminderInterval);
     reminderInterval = null;
   }
+
+  reminderPopupWindows.forEach(({ window }) => {
+    if (!window.isDestroyed()) {
+      window.destroy();
+    }
+  });
+  reminderPopupWindows = [];
+
+  if (supabaseMessageServiceStop) {
+    void supabaseMessageServiceStop();
+    supabaseMessageServiceStop = null;
+  }
+
+  supabaseSharedTaskService = null;
 });
 
 app.on('window-all-closed', () => {
@@ -1443,6 +1781,11 @@ void app.whenReady().then(() => {
   createTray();
   registerShortcuts();
   getLiveState();
+  void startSupabaseMessageFeed();
+  void startSupabaseSharedTaskFeed();
+  screen.on('display-added', repositionReminderPopups);
+  screen.on('display-removed', repositionReminderPopups);
+  screen.on('display-metrics-changed', repositionReminderPopups);
 
   powerMonitor.on('resume', () => {
     void checkDueReminders();

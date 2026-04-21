@@ -98,6 +98,12 @@ const api: TodoAppApi = {
   },
   app: {
     show: () => ipcRenderer.invoke('app:show') as Promise<void>,
+    showSelection: (selection: AppSelection) =>
+      ipcRenderer.invoke('app:showSelection', selection) as Promise<void>,
+    previewReminderPopup: () =>
+      ipcRenderer.invoke('app:previewReminderPopup') as Promise<void>,
+    closeCurrentWindow: () =>
+      ipcRenderer.invoke('app:closeCurrentWindow') as Promise<void>,
     onSelection: (listener: SelectionListener) => {
       selectionListeners.add(listener);
 
