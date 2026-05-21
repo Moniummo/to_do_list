@@ -19,7 +19,13 @@ import {
   normalizeTaskPriority,
 } from './taskPriority';
 import type {
+  AccountStatus,
+  AppInfo,
+  AppDndMode,
+  AppPopupEvent,
   AppSelection,
+  FriendCodeAlias,
+  FriendNetworkStatus,
   HistoryDayPayload,
   OccurrenceStatus,
   RoutineDraft,
@@ -31,11 +37,16 @@ import type {
   RoutineUnit,
   RoutineUpdate,
   RoutineWeekday,
+  SavedFriendContact,
   Task,
   TaskCompletionDateUpdate,
   TaskDraft,
   TaskPriority,
   TaskUpdate,
+  TimeBlock,
+  TimeBlockDraft,
+  WebsiteTaskEditSuggestion,
+  WebsiteTaskSubmission,
 } from './types';
 
 type OneOffFormValues = {
@@ -74,7 +85,86 @@ type MiniComposerValues = {
   priority: TaskPriority;
 };
 
-type MainView = 'today' | 'week' | 'routines' | 'history';
+type ThemePresetId =
+  | 'black-blue'
+  | 'black-red'
+  | 'blue-green'
+  | 'black-gold'
+  | 'forest-mint'
+  | 'custom';
+
+type AppThemeSettings = {
+  presetId: ThemePresetId;
+  customBase: string;
+  customAccent: string;
+};
+
+type ThemePalette = {
+  id: ThemePresetId;
+  label: string;
+  base: string;
+  accent: string;
+};
+
+type MainScreenProps = {
+  themeSettings: AppThemeSettings;
+  onThemeChange: (settings: AppThemeSettings) => void;
+};
+
+type MainView =
+  | 'today'
+  | 'planner'
+  | 'week'
+  | 'routines'
+  | 'history'
+  | 'submissions'
+  | 'network';
+
+type TimeBlockFormValues = {
+  title: string;
+  taskId: string;
+  date: string;
+  startTime: string;
+  endTime: string;
+  notes: string;
+  enableDnd: boolean;
+};
+
+type FriendPopupFormValues = {
+  recipientFriendCode: string;
+  senderName: string;
+  message: string;
+  isEmergency: boolean;
+  emergencyPassword: string;
+};
+
+type FriendTaskSuggestionFormValues = {
+  recipientFriendCode: string;
+  senderName: string;
+} & OneOffFormValues;
+
+type FriendTaskEditSuggestionFormValues = {
+  recipientFriendCode: string;
+  senderName: string;
+  taskTitle: string;
+  suggestedTitle: string;
+  suggestedNotes: string;
+  suggestedDueDate: string;
+  suggestedDueTime: string;
+  suggestedReminderDate: string;
+  suggestedReminderTime: string;
+  suggestedPriority: TaskPriority;
+};
+
+type AccountFormValues = {
+  username: string;
+  password: string;
+};
+
+type FriendContactFormValues = {
+  nickname: string;
+  friendCode: string;
+};
 
 type WeeklyPlanItem = {
   id: string;
@@ -103,6 +193,19 @@ type RoutineRowProps = {
   onEdit: (template: RoutineTemplate) => void;
 };
 
+type SubmissionRowProps = {
+  submission: WebsiteTaskSubmission;
+  onAccept: (submissionId: string) => Promise<void>;
+  onDismiss: (submissionId: string) => Promise<void>;
+};
+
+type TaskEditSuggestionRowProps = {
+  suggestion: WebsiteTaskEditSuggestion;
+  currentTask?: Task;
+  onAccept: (suggestionId: string) => Promise<void>;
+  onDismiss: (suggestionId: string) => Promise<void>;
+};
+
 type HistoryDayModalProps = {
   payload: HistoryDayPayload;
   isLoading: boolean;
@@ -129,6 +232,9 @@ type ReminderPopupPayload = {
   selection?: AppSelection;
   contextLabel?: string;
   contextValue?: string;
+  presentation?: 'standard' | 'mega';
+  queuedCount?: number;
+  sourceEventId?: string;
 };
 
 type PickerChoice = {
@@ -158,6 +264,158 @@ type ScheduleCardProps = {
 };
 
 const MINI_SHORTCUT_LABEL = 'Ctrl + Shift + A';
+const THEME_STORAGE_KEY = 'desktop-planner-theme';
+const DEFAULT_THEME_SETTINGS: AppThemeSettings = {
+  presetId: 'black-blue',
+  customBase: '#050505',
+  customAccent: '#2563eb',
+};
+const THEME_PRESETS: ThemePalette[] = [
+  {
+    id: 'black-blue',
+    label: 'Black + Blue',
+    base: '#050505',
+    accent: '#2563eb',
+  },
+  {
+    id: 'black-red',
+    label: 'Black + Red',
+    base: '#050505',
+    accent: '#ef4444',
+  },
+  {
+    id: 'blue-green',
+    label: 'Dark Blue + Green',
+    base: '#061426',
+    accent: '#22c55e',
+  },
+  {
+    id: 'black-gold',
+    label: 'Black + Gold',
+    base: '#070604',
+    accent: '#f59e0b',
+  },
+  {
+    id: 'forest-mint',
+    label: 'Forest + Mint',
+    base: '#071711',
+    accent: '#5eead4',
+  },
+];
+
+const isThemePresetId = (value: unknown): value is ThemePresetId =>
+  typeof value === 'string' &&
+  ['black-blue', 'black-red', 'blue-green', 'black-gold', 'forest-mint', 'custom'].includes(
+    value,
+  );
+
+const normalizeHexColor = (value: unknown, fallback: string): string =>
+  typeof value === 'string' && /^#[0-9a-fA-F]{6}$/.test(value) ? value : fallback;
+
+const loadThemeSettings = (): AppThemeSettings => {
+  try {
+    const stored = window.localStorage.getItem(THEME_STORAGE_KEY);
+
+    if (!stored) {
+      return DEFAULT_THEME_SETTINGS;
+    }
+
+    const parsed = JSON.parse(stored) as Partial<AppThemeSettings>;
+
+    return {
+      presetId: isThemePresetId(parsed.presetId)
+        ? parsed.presetId
+        : DEFAULT_THEME_SETTINGS.presetId,
+      customBase: normalizeHexColor(parsed.customBase, DEFAULT_THEME_SETTINGS.customBase),
+      customAccent: normalizeHexColor(parsed.customAccent, DEFAULT_THEME_SETTINGS.customAccent),
+    };
+  } catch (_error) {
+    return DEFAULT_THEME_SETTINGS;
+  }
+};
+
+const saveThemeSettings = (settings: AppThemeSettings): void => {
+  window.localStorage.setItem(THEME_STORAGE_KEY, JSON.stringify(settings));
+};
+
+const hexToRgb = (hexColor: string): [number, number, number] => {
+  const normalized = hexColor.replace('#', '');
+
+  return [
+    Number.parseInt(normalized.slice(0, 2), 16),
+    Number.parseInt(normalized.slice(2, 4), 16),
+    Number.parseInt(normalized.slice(4, 6), 16),
+  ];
+};
+
+const mixHexColors = (fromColor: string, toColor: string, amount: number): string => {
+  const from = hexToRgb(fromColor);
+  const to = hexToRgb(toColor);
+  const mixed = from.map((fromChannel, index) =>
+    Math.round(fromChannel + (to[index] - fromChannel) * amount),
+  );
+
+  return `#${mixed.map((channel) => channel.toString(16).padStart(2, '0')).join('')}`;
+};
+
+const toRgba = (hexColor: string, alpha: number): string => {
+  const [red, green, blue] = hexToRgb(hexColor);
+  return `rgba(${red}, ${green}, ${blue}, ${alpha})`;
+};
+
+const getThemePalette = (settings: AppThemeSettings): ThemePalette => {
+  if (settings.presetId === 'custom') {
+    return {
+      id: 'custom',
+      label: 'Custom',
+      base: settings.customBase,
+      accent: settings.customAccent,
+    };
+  }
+
+  return (
+    THEME_PRESETS.find((preset) => preset.id === settings.presetId) ?? THEME_PRESETS[0]
+  );
+};
+
+const applyThemeSettings = (settings: AppThemeSettings): void => {
+  const palette = getThemePalette(settings);
+  const root = document.documentElement;
+  const body = document.body;
+  const panel = mixHexColors(palette.base, '#ffffff', 0.055);
+  const panelStrong = mixHexColors(palette.base, palette.accent, 0.11);
+  const bgSoft = mixHexColors(palette.base, '#ffffff', 0.035);
+  const row = mixHexColors(palette.base, '#ffffff', 0.045);
+  const text = mixHexColors('#ffffff', palette.accent, 0.045);
+  const muted = mixHexColors('#dbeafe', palette.base, 0.18);
+  const themedVariables: Array<[string, string]> = [
+    ['--bg', palette.base],
+    ['--bg-soft', bgSoft],
+    ['--panel', panel],
+    ['--panel-strong', panelStrong],
+    ['--sidebar', mixHexColors(palette.base, '#000000', 0.22)],
+    ['--row', row],
+    ['--line', toRgba(palette.accent, 0.13)],
+    ['--line-strong', toRgba(palette.accent, 0.44)],
+    ['--text', text],
+    ['--muted', muted],
+    ['--accent', palette.accent],
+    ['--accent-soft', toRgba(palette.accent, 0.18)],
+    ['--danger', palette.accent],
+    ['--danger-soft', toRgba(palette.accent, 0.18)],
+    ['--success', mixHexColors(palette.accent, '#ffffff', 0.2)],
+    ['--success-soft', toRgba(palette.accent, 0.16)],
+    ['--theme-glow-primary', toRgba(palette.accent, 0.16)],
+    ['--theme-glow-secondary', toRgba(palette.accent, 0.1)],
+    ['--theme-bg-top', mixHexColors(palette.base, '#000000', 0.25)],
+  ];
+
+  body.dataset.appTheme = palette.id;
+  themedVariables.forEach(([name, value]) => {
+    root.style.setProperty(name, value);
+    body.style.setProperty(name, value);
+  });
+};
 const dateTimeFormatter = new Intl.DateTimeFormat(undefined, {
   month: 'short',
   day: 'numeric',
@@ -291,6 +549,36 @@ const createEmptyMiniComposer = (): MiniComposerValues => ({
   reminderTime: '',
   priority: 'auto',
 });
+
+const createEmptyTimeBlockForm = (date = toLocalDateString(new Date())): TimeBlockFormValues => ({
+  title: '',
+  taskId: '',
+  date,
+  startTime: '09:00',
+  endTime: '10:00',
+  notes: '',
+  enableDnd: false,
+});
+
+const createEmptyFriendTaskSuggestionForm = (): FriendTaskSuggestionFormValues => ({
+  recipientFriendCode: '',
+  senderName: '',
+  ...createEmptyTaskForm(),
+});
+
+const createEmptyFriendTaskEditSuggestionForm =
+  (): FriendTaskEditSuggestionFormValues => ({
+    recipientFriendCode: '',
+    senderName: '',
+    taskTitle: '',
+    suggestedTitle: '',
+    suggestedNotes: '',
+    suggestedDueDate: '',
+    suggestedDueTime: '',
+    suggestedReminderDate: '',
+    suggestedReminderTime: '',
+    suggestedPriority: 'auto',
+  });
 
 const toLocalDateTimeInputValue = (value?: string): string => {
   if (!value) {
@@ -461,6 +749,24 @@ const buildTaskUpdate = (taskId: string, values: OneOffFormValues): TaskUpdate =
   };
 };
 
+const buildTimeBlockDraft = (values: TimeBlockFormValues): TimeBlockDraft => {
+  const startAt = toIsoValue(`${values.date}T${values.startTime}`);
+  const endAt = toIsoValue(`${values.date}T${values.endTime}`);
+
+  if (!startAt || !endAt) {
+    throw new Error('Choose a valid time block date and time.');
+  }
+
+  return {
+    title: values.title,
+    startAt,
+    endAt,
+    taskId: values.taskId || undefined,
+    notes: values.notes || undefined,
+    enableDnd: values.enableDnd,
+  };
+};
+
 const buildRoutineDraft = (values: RoutineFormValues): RoutineDraft => ({
   title: values.title,
   notes: values.notes,
@@ -621,6 +927,9 @@ const getReminderPopupPayload = (): ReminderPopupPayload | null => {
       selection?: unknown;
       contextLabel?: unknown;
       contextValue?: unknown;
+      presentation?: unknown;
+      queuedCount?: unknown;
+      sourceEventId?: unknown;
     };
 
     if (
@@ -643,11 +952,21 @@ const getReminderPopupPayload = (): ReminderPopupPayload | null => {
               id?: unknown;
             };
 
-            return (nextSelection.kind === 'task' ||
-              nextSelection.kind === 'routine') &&
+            if (
+              (nextSelection.kind === 'task' || nextSelection.kind === 'routine') &&
               typeof nextSelection.id === 'string'
-              ? (nextSelection as AppSelection)
-              : undefined;
+            ) {
+              return nextSelection as AppSelection;
+            }
+
+            if (
+              nextSelection.kind === 'view' &&
+              (nextSelection.id === 'submissions' || nextSelection.id === 'network')
+            ) {
+              return nextSelection as AppSelection;
+            }
+
+            return undefined;
           })()
         : undefined;
 
@@ -662,6 +981,17 @@ const getReminderPopupPayload = (): ReminderPopupPayload | null => {
       contextValue:
         typeof parsedPayload.contextValue === 'string'
           ? parsedPayload.contextValue
+          : undefined,
+      presentation:
+        parsedPayload.presentation === 'mega' ||
+        parsedPayload.presentation === 'standard'
+          ? parsedPayload.presentation
+          : undefined,
+      queuedCount:
+        typeof parsedPayload.queuedCount === 'number' ? parsedPayload.queuedCount : undefined,
+      sourceEventId:
+        typeof parsedPayload.sourceEventId === 'string'
+          ? parsedPayload.sourceEventId
           : undefined,
     };
   } catch (_error) {
@@ -1340,6 +1670,213 @@ function RoutineRow({
   );
 }
 
+function SubmissionRow({ submission, onAccept, onDismiss }: SubmissionRowProps) {
+  const [isBusy, setIsBusy] = useState(false);
+  const [localError, setLocalError] = useState<string | null>(null);
+  const submittedLabel = formatDateTime(submission.createdAt);
+  const metaLine = joinMeta(
+    submission.senderName ? `From ${submission.senderName}` : 'No sender name',
+    submission.source ? `Source ${submission.source}` : null,
+    submittedLabel ? `Submitted ${submittedLabel}` : null,
+  );
+
+  const handleAccept = async () => {
+    setIsBusy(true);
+    setLocalError(null);
+
+    try {
+      await onAccept(submission.id);
+    } catch (error) {
+      setLocalError(getErrorMessage(error));
+    } finally {
+      setIsBusy(false);
+    }
+  };
+
+  const handleDismiss = async () => {
+    setIsBusy(true);
+    setLocalError(null);
+
+    try {
+      await onDismiss(submission.id);
+    } catch (error) {
+      setLocalError(getErrorMessage(error));
+    } finally {
+      setIsBusy(false);
+    }
+  };
+
+  return (
+    <article className="task-row submission-row">
+      <div className="row-main">
+        <span className="routine-indicator muted" aria-hidden="true" />
+
+        <div className="row-copy">
+          <div className="row-title-line">
+            <h3 className="row-title">{submission.title}</h3>
+            <span className="status-chip danger">pending review</span>
+          </div>
+
+          {submission.details ? <p className="row-note">{submission.details}</p> : null}
+          <p className="row-meta">{metaLine}</p>
+        </div>
+
+        <div className="row-side-actions">
+          <button className="link-button" type="button" disabled={isBusy} onClick={handleAccept}>
+            Accept
+          </button>
+          <button
+            className="link-button danger-link"
+            type="button"
+            disabled={isBusy}
+            onClick={handleDismiss}
+          >
+            Dismiss
+          </button>
+        </div>
+      </div>
+
+      <div className="row-actions compact">
+        <span className="row-meta">
+          Accept to turn this into a normal local task. Dismiss to keep it out of your main
+          workflow.
+        </span>
+      </div>
+
+      {localError ? <div className="banner">{localError}</div> : null}
+    </article>
+  );
+}
+
+function TaskEditSuggestionRow({
+  suggestion,
+  currentTask,
+  onAccept,
+  onDismiss,
+}: TaskEditSuggestionRowProps) {
+  const [isBusy, setIsBusy] = useState(false);
+  const [localError, setLocalError] = useState<string | null>(null);
+  const submittedLabel = formatDateTime(suggestion.createdAt);
+  const metaLine = joinMeta(
+    suggestion.senderName ? `From ${suggestion.senderName}` : 'No sender name',
+    suggestion.source ? `Source ${suggestion.source}` : null,
+    submittedLabel ? `Submitted ${submittedLabel}` : null,
+  );
+
+  const formatPriorityLabel = (value?: TaskPriority) =>
+    value ? `${value.slice(0, 1).toUpperCase()}${value.slice(1)}` : 'Auto';
+
+  const changeRows = [
+    suggestion.changeTitle
+      ? `Title: ${currentTask?.title ?? suggestion.taskTitleSnapshot} -> ${
+          suggestion.suggestedTitle ?? 'Missing suggestion'
+        }`
+      : null,
+    suggestion.changeNotes
+      ? `Description: ${
+          suggestion.suggestedNotes?.trim() ? suggestion.suggestedNotes : 'Clear description'
+        }`
+      : null,
+    suggestion.changeDueAt
+      ? `Due date: ${
+          suggestion.suggestedDueAt
+            ? formatDateTime(suggestion.suggestedDueAt) ?? suggestion.suggestedDueAt
+            : 'Clear due date'
+        }`
+      : null,
+    suggestion.changeReminderAt
+      ? `Reminder date: ${
+          suggestion.suggestedReminderAt
+            ? formatDateTime(suggestion.suggestedReminderAt) ?? suggestion.suggestedReminderAt
+            : 'Clear reminder date'
+        }`
+      : null,
+    suggestion.changePriority
+      ? `Priority: ${
+          formatPriorityLabel(currentTask?.priority)
+        } -> ${formatPriorityLabel(suggestion.suggestedPriority)}`
+      : null,
+  ].filter((value): value is string => Boolean(value));
+
+  const handleAccept = async () => {
+    setIsBusy(true);
+    setLocalError(null);
+
+    try {
+      await onAccept(suggestion.id);
+    } catch (error) {
+      setLocalError(getErrorMessage(error));
+    } finally {
+      setIsBusy(false);
+    }
+  };
+
+  const handleDismiss = async () => {
+    setIsBusy(true);
+    setLocalError(null);
+
+    try {
+      await onDismiss(suggestion.id);
+    } catch (error) {
+      setLocalError(getErrorMessage(error));
+    } finally {
+      setIsBusy(false);
+    }
+  };
+
+  return (
+    <article className="task-row submission-row">
+      <div className="row-main">
+        <span className="routine-indicator accent" aria-hidden="true" />
+
+        <div className="row-copy">
+          <div className="row-title-line">
+            <h3 className="row-title">{suggestion.taskTitleSnapshot}</h3>
+            <span className="status-chip accent">edit suggestion</span>
+            {currentTask ? null : <span className="status-chip danger">task missing</span>}
+          </div>
+
+          <p className="row-meta">{metaLine}</p>
+          {changeRows.map((changeRow) => (
+            <p key={changeRow} className="row-note">
+              {changeRow}
+            </p>
+          ))}
+        </div>
+
+        <div className="row-side-actions">
+          <button
+            className="link-button"
+            type="button"
+            disabled={isBusy || !currentTask}
+            onClick={handleAccept}
+          >
+            Accept
+          </button>
+          <button
+            className="link-button danger-link"
+            type="button"
+            disabled={isBusy}
+            onClick={handleDismiss}
+          >
+            Dismiss
+          </button>
+        </div>
+      </div>
+
+      <div className="row-actions compact">
+        <span className="row-meta">
+          {currentTask
+            ? 'Accept to apply these changes to the existing local task. Dismiss to leave the task unchanged.'
+            : 'The original task no longer exists locally, so this suggestion can only be dismissed.'}
+        </span>
+      </div>
+
+      {localError ? <div className="banner">{localError}</div> : null}
+    </article>
+  );
+}
+
 function HistoryDayModal({
   payload,
   isLoading,
@@ -1598,15 +2135,55 @@ function HistoryDayModal({
   );
 }
 
-function MainScreen() {
+function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
+  const [appInfo, setAppInfo] = useState<AppInfo | null>(null);
+  const [accountStatus, setAccountStatus] = useState<AccountStatus | null>(null);
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [timeBlocks, setTimeBlocks] = useState<TimeBlock[]>([]);
   const [routines, setRoutines] = useState<RoutineListItem[]>([]);
+  const [submissions, setSubmissions] = useState<WebsiteTaskSubmission[]>([]);
+  const [editSuggestions, setEditSuggestions] = useState<WebsiteTaskEditSuggestion[]>([]);
+  const [friendNetworkStatus, setFriendNetworkStatus] =
+    useState<FriendNetworkStatus | null>(null);
+  const [friendCodes, setFriendCodes] = useState<FriendCodeAlias[]>([]);
+  const [friendContacts, setFriendContacts] = useState<SavedFriendContact[]>([]);
+  const [pendingFriendEvents, setPendingFriendEvents] = useState<AppPopupEvent[]>([]);
+  const [recentFriendEvents, setRecentFriendEvents] = useState<AppPopupEvent[]>([]);
   const [historyPayload, setHistoryPayload] = useState<RoutineHistoryPayload | null>(null);
   const [historySummary, setHistorySummary] = useState<RoutineHistorySummary | null>(null);
   const [taskFormValues, setTaskFormValues] = useState<OneOffFormValues>(createEmptyTaskForm());
+  const [plannerDate, setPlannerDate] = useState(toLocalDateString(new Date()));
+  const [timeBlockForm, setTimeBlockForm] = useState<TimeBlockFormValues>(
+    createEmptyTimeBlockForm(),
+  );
   const [routineFormValues, setRoutineFormValues] = useState<RoutineFormValues>(
     createEmptyRoutineForm(),
   );
+  const [friendCodeDraft, setFriendCodeDraft] = useState('');
+  const [accountForm, setAccountForm] = useState<AccountFormValues>({
+    username: '',
+    password: '',
+  });
+  const [friendContactForm, setFriendContactForm] = useState<FriendContactFormValues>({
+    nickname: '',
+    friendCode: '',
+  });
+  const [friendPopupForm, setFriendPopupForm] = useState<FriendPopupFormValues>({
+    recipientFriendCode: '',
+    senderName: '',
+    message: '',
+    isEmergency: false,
+    emergencyPassword: '',
+  });
+  const [friendTaskSuggestionForm, setFriendTaskSuggestionForm] =
+    useState<FriendTaskSuggestionFormValues>(createEmptyFriendTaskSuggestionForm());
+  const [friendTaskEditSuggestionForm, setFriendTaskEditSuggestionForm] =
+    useState<FriendTaskEditSuggestionFormValues>(
+      createEmptyFriendTaskEditSuggestionForm(),
+    );
+  const [recentPopupPasswordDraft, setRecentPopupPasswordDraft] = useState('');
+  const [newRecentPopupPasswordDraft, setNewRecentPopupPasswordDraft] = useState('');
+  const [isRecentPopupsUnlocked, setIsRecentPopupsUnlocked] = useState(false);
   const [activeView, setActiveView] = useState<MainView>('today');
   const [editingRoutineId, setEditingRoutineId] = useState<string | null>(null);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
@@ -1630,13 +2207,49 @@ function MainScreen() {
   const routineTitleInputRef = useRef<HTMLInputElement | null>(null);
 
   const syncDashboard = async (): Promise<RoutineListItem[]> => {
-    const [nextTasks, nextRoutines] = await Promise.all([
-      window.todoApp.tasks.list(),
-      window.todoApp.routines.list(),
+    const [nextAppInfo, nextAccountStatus] = await Promise.all([
+      window.todoApp.app.info(),
+      window.todoApp.account.status(),
     ]);
 
+    const [
+      nextTasks,
+      nextTimeBlocks,
+      nextRoutines,
+      nextSubmissions,
+      nextEditSuggestions,
+      nextFriendNetworkStatus,
+      nextFriendCodes,
+      nextFriendContacts,
+      nextPendingFriendEvents,
+      nextRecentFriendEvents,
+    ] = await Promise.all([
+      window.todoApp.tasks.list(),
+      window.todoApp.timeBlocks.list(),
+      window.todoApp.routines.list(),
+      nextAppInfo.isDevVariant ? window.todoApp.submissions.list() : Promise.resolve([]),
+      nextAppInfo.isDevVariant ? window.todoApp.editSuggestions.list() : Promise.resolve([]),
+      window.todoApp.friendNetwork.status(),
+      window.todoApp.friendNetwork.listFriendCodes(),
+      window.todoApp.friendNetwork.listContacts(),
+      window.todoApp.friendNetwork.listPendingEvents(),
+      nextAppInfo.isDevVariant
+        ? window.todoApp.friendNetwork.listRecentEvents()
+        : Promise.resolve([]),
+    ]);
+
+    setAppInfo(nextAppInfo);
+    setAccountStatus(nextAccountStatus);
     setTasks(nextTasks);
+    setTimeBlocks(nextTimeBlocks);
     setRoutines(nextRoutines);
+    setSubmissions(nextSubmissions);
+    setEditSuggestions(nextEditSuggestions);
+    setFriendNetworkStatus(nextFriendNetworkStatus);
+    setFriendCodes(nextFriendCodes);
+    setFriendContacts(nextFriendContacts);
+    setPendingFriendEvents(nextPendingFriendEvents);
+    setRecentFriendEvents(nextRecentFriendEvents);
 
     setSelectedRoutineId((current) => {
       if (current && nextRoutines.some((item) => item.template.id === current)) {
@@ -1713,19 +2326,34 @@ function MainScreen() {
     document.title = 'To Do List';
 
     let isActive = true;
+    let refreshTimeout: ReturnType<typeof setTimeout> | null = null;
+    let isRefreshRunning = false;
+    let isRefreshQueued = false;
 
     const load = async (markLoaded = false) => {
-      try {
-        await refreshAll();
+      if (isRefreshRunning) {
+        isRefreshQueued = true;
+        return;
+      }
 
-        if (isActive) {
-          setError(null);
-        }
+      isRefreshRunning = true;
+
+      try {
+        do {
+          isRefreshQueued = false;
+          await refreshAll();
+
+          if (isActive) {
+            setError(null);
+          }
+        } while (isActive && isRefreshQueued);
       } catch (loadError) {
         if (isActive) {
           setError(getErrorMessage(loadError));
         }
       } finally {
+        isRefreshRunning = false;
+
         if (markLoaded && isActive) {
           setIsLoading(false);
         }
@@ -1735,16 +2363,34 @@ function MainScreen() {
     void load(true);
 
     const handleDataChange = () => {
-      void load(false);
+      if (refreshTimeout) {
+        clearTimeout(refreshTimeout);
+      }
+
+      refreshTimeout = setTimeout(() => {
+        refreshTimeout = null;
+        void load(false);
+      }, 120);
     };
 
     const removeTaskListener = window.todoApp.tasks.onChanged(handleDataChange);
+    const removeTimeBlockListener = window.todoApp.timeBlocks.onChanged(handleDataChange);
     const removeRoutineListener = window.todoApp.routines.onChanged(handleDataChange);
+    const removeSubmissionListener = window.todoApp.submissions.onChanged(handleDataChange);
+    const removeEditSuggestionListener =
+      window.todoApp.editSuggestions.onChanged(handleDataChange);
+    const removeFriendNetworkListener = window.todoApp.friendNetwork.onChanged(handleDataChange);
+    const removeAccountListener = window.todoApp.account.onChanged(handleDataChange);
     const removeSelectionListener = window.todoApp.app.onSelection(
       (selection: AppSelection) => {
         if (selection.kind === 'task') {
           setSelectedTaskId(selection.id);
           setActiveView('today');
+          return;
+        }
+
+        if (selection.kind === 'view') {
+          setActiveView(selection.id);
           return;
         }
 
@@ -1758,12 +2404,32 @@ function MainScreen() {
 
     return () => {
       isActive = false;
+
+      if (refreshTimeout) {
+        clearTimeout(refreshTimeout);
+      }
+
       removeTaskListener();
+      removeTimeBlockListener();
       removeRoutineListener();
+      removeSubmissionListener();
+      removeEditSuggestionListener();
+      removeFriendNetworkListener();
+      removeAccountListener();
       removeSelectionListener();
       window.removeEventListener('focus', handleDataChange);
     };
   }, []);
+
+  useEffect(() => {
+    document.body.dataset.appVariant = appInfo?.variant ?? 'dev';
+  }, [appInfo?.variant]);
+
+  useEffect(() => {
+    if (appInfo?.variant === 'user' && activeView === 'submissions') {
+      setActiveView('today');
+    }
+  }, [activeView, appInfo?.variant]);
 
   useEffect(() => {
     if (isLoading) {
@@ -1912,6 +2578,21 @@ function MainScreen() {
   const hasAnyHistory = Boolean(completedPassiveTasks.length || routines.length);
   const weekDates = buildWeekDates(toLocalDateString(new Date()));
   const weeklyPlan = buildWeeklyPlan(tasks, routines, weekDates);
+  const plannerWeekDates = buildWeekDates(plannerDate);
+  const plannerBlocks = timeBlocks.filter(
+    (block) => toLocalDateString(new Date(block.startAt)) === plannerDate,
+  );
+  const timeBlockedTaskIds = new Set(timeBlocks.map((block) => block.taskId).filter(Boolean));
+  const unplannedTasks = pendingTasks.filter((task) => !timeBlockedTaskIds.has(task.id));
+  const dueTasksForPlannerDate = pendingTasks.filter(
+    (task) => task.dueAt && toLocalDateString(new Date(task.dueAt)) === plannerDate,
+  );
+  const plannerMinutes = plannerBlocks.reduce(
+    (minutes, block) =>
+      minutes +
+      Math.max(0, new Date(block.endAt).getTime() - new Date(block.startAt).getTime()) / 60_000,
+    0,
+  );
 
   const handleTaskSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -1971,6 +2652,69 @@ function MainScreen() {
     setTasks(nextTasks);
   };
 
+  const handleTimeBlockSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setError(null);
+    setIsSubmitting(true);
+
+    try {
+      const nextBlocks = await window.todoApp.timeBlocks.create(
+        buildTimeBlockDraft(timeBlockForm),
+      );
+      setTimeBlocks(nextBlocks);
+      setTimeBlockForm(createEmptyTimeBlockForm(plannerDate));
+    } catch (submitError) {
+      setError(getErrorMessage(submitError));
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const planTaskForDate = async (task: Task, date = plannerDate) => {
+    const nextBlocks = await window.todoApp.timeBlocks.create(
+      buildTimeBlockDraft({
+        ...createEmptyTimeBlockForm(date),
+        title: task.title,
+        taskId: task.id,
+      }),
+    );
+    setTimeBlocks(nextBlocks);
+  };
+
+  const planDroppedTask = (taskId: string, date = plannerDate) => {
+    const task = pendingTasks.find((candidate) => candidate.id === taskId);
+
+    if (task) {
+      void planTaskForDate(task, date);
+    }
+  };
+
+  const handleMoveTimeBlock = async (block: TimeBlock, minutes: number) => {
+    const nextBlocks = await window.todoApp.timeBlocks.update({
+      id: block.id,
+      startAt: new Date(new Date(block.startAt).getTime() + minutes * 60_000).toISOString(),
+      endAt: new Date(new Date(block.endAt).getTime() + minutes * 60_000).toISOString(),
+      status: 'planned',
+    });
+    setTimeBlocks(nextBlocks);
+  };
+
+  const handleTimeBlockStatus = async (
+    block: TimeBlock,
+    status: TimeBlock['status'],
+  ) => {
+    const nextBlocks = await window.todoApp.timeBlocks.update({
+      id: block.id,
+      status,
+    });
+    setTimeBlocks(nextBlocks);
+  };
+
+  const handleDeleteTimeBlock = async (blockId: string) => {
+    const nextBlocks = await window.todoApp.timeBlocks.delete(blockId);
+    setTimeBlocks(nextBlocks);
+  };
+
   const handleCompleteTask = async (taskId: string) => {
     const nextTasks = await window.todoApp.tasks.complete(taskId);
     setTasks(nextTasks);
@@ -2025,6 +2769,329 @@ function MainScreen() {
     await syncHistory(historyRoutineId);
   };
 
+  const handleAcceptSubmission = async (submissionId: string) => {
+    await window.todoApp.submissions.accept(submissionId);
+    await refreshAll();
+  };
+
+  const handleDismissSubmission = async (submissionId: string) => {
+    await window.todoApp.submissions.dismiss(submissionId);
+    await refreshAll();
+  };
+
+  const handleAcceptEditSuggestion = async (suggestionId: string) => {
+    await window.todoApp.editSuggestions.accept(suggestionId);
+    await refreshAll();
+  };
+
+  const handleDismissEditSuggestion = async (suggestionId: string) => {
+    await window.todoApp.editSuggestions.dismiss(suggestionId);
+    await refreshAll();
+  };
+
+  const handleDndModeChange = async (mode: AppDndMode) => {
+    setError(null);
+
+    try {
+      const nextStatus = await window.todoApp.friendNetwork.setDndMode(mode);
+      setFriendNetworkStatus(nextStatus);
+      await refreshAll();
+    } catch (dndError) {
+      setError(getErrorMessage(dndError));
+    }
+  };
+
+  const handleAccountSubmit = async (
+    event: React.FormEvent<HTMLFormElement>,
+    mode: 'signIn' | 'signUp',
+  ) => {
+    event.preventDefault();
+    setError(null);
+
+    try {
+      const nextStatus =
+        mode === 'signIn'
+          ? await window.todoApp.account.signIn(accountForm)
+          : await window.todoApp.account.signUp(accountForm);
+      setAccountStatus(nextStatus);
+      setAccountForm({
+        username: '',
+        password: '',
+      });
+      await refreshAll();
+    } catch (accountError) {
+      setError(getErrorMessage(accountError));
+    }
+  };
+
+  const handleAccountSignOut = async () => {
+    setError(null);
+
+    try {
+      const nextStatus = await window.todoApp.account.signOut();
+      setAccountStatus(nextStatus);
+      await refreshAll();
+    } catch (accountError) {
+      setError(getErrorMessage(accountError));
+    }
+  };
+
+  const handleAccountSyncNow = async () => {
+    setError(null);
+
+    try {
+      const nextStatus = await window.todoApp.account.syncNow();
+      setAccountStatus(nextStatus);
+      await refreshAll();
+    } catch (accountError) {
+      setError(getErrorMessage(accountError));
+    }
+  };
+
+  const handleFriendCodeSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setError(null);
+
+    try {
+      await window.todoApp.friendNetwork.setFriendCode(friendCodeDraft);
+      setFriendCodeDraft('');
+      await refreshAll();
+    } catch (friendCodeError) {
+      setError(getErrorMessage(friendCodeError));
+    }
+  };
+
+  const handleFriendContactSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setError(null);
+
+    try {
+      const nextContacts = await window.todoApp.friendNetwork.saveContact({
+        nickname: friendContactForm.nickname,
+        friendCode: friendContactForm.friendCode,
+      });
+      setFriendContacts(nextContacts);
+      setFriendContactForm({
+        nickname: '',
+        friendCode: '',
+      });
+    } catch (contactError) {
+      setError(getErrorMessage(contactError));
+    }
+  };
+
+  const handleFriendContactDelete = async (contactId: string) => {
+    setError(null);
+
+    try {
+      const nextContacts = await window.todoApp.friendNetwork.deleteContact(contactId);
+      setFriendContacts(nextContacts);
+    } catch (contactError) {
+      setError(getErrorMessage(contactError));
+    }
+  };
+
+  const applyContactToPopupForm = (contact: SavedFriendContact) => {
+    setFriendPopupForm((current) => ({
+      ...current,
+      recipientFriendCode: contact.friendCode,
+    }));
+  };
+
+  const applyContactToTaskSuggestionForm = (contact: SavedFriendContact) => {
+    setFriendTaskSuggestionForm((current) => ({
+      ...current,
+      recipientFriendCode: contact.friendCode,
+    }));
+  };
+
+  const applyContactToTaskEditSuggestionForm = (contact: SavedFriendContact) => {
+    setFriendTaskEditSuggestionForm((current) => ({
+      ...current,
+      recipientFriendCode: contact.friendCode,
+    }));
+  };
+
+  const handleFriendPopupSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setError(null);
+
+    try {
+      await window.todoApp.friendNetwork.sendPopup({
+        recipientFriendCode: friendPopupForm.recipientFriendCode,
+        senderName: friendPopupForm.senderName,
+        kind: friendPopupForm.isEmergency ? 'emergency_popup' : 'general_popup',
+        priority: friendPopupForm.isEmergency ? 'emergency' : 'normal',
+        title: friendPopupForm.isEmergency ? 'Emergency Popup' : undefined,
+        message: friendPopupForm.message,
+        emergencyPassword: friendPopupForm.emergencyPassword,
+      });
+      setFriendPopupForm((current) => ({
+        ...current,
+        message: '',
+        isEmergency: false,
+        emergencyPassword: '',
+      }));
+    } catch (friendPopupError) {
+      setError(getErrorMessage(friendPopupError));
+    }
+  };
+
+  const handleFriendTaskSuggestionSubmit = async (
+    event: React.FormEvent<HTMLFormElement>,
+  ) => {
+    event.preventDefault();
+    setError(null);
+
+    try {
+      const taskDraft = buildTaskDraft(friendTaskSuggestionForm);
+
+      if (!taskDraft.title.trim()) {
+        throw new Error('Task title is required.');
+      }
+
+      await window.todoApp.friendNetwork.sendPopup({
+        recipientFriendCode: friendTaskSuggestionForm.recipientFriendCode,
+        senderName: friendTaskSuggestionForm.senderName,
+        kind: 'task_submission',
+        priority: 'normal',
+        title: taskDraft.title,
+        message:
+          taskDraft.notes ??
+          `Suggested new task: ${taskDraft.title}`,
+        payload: {
+          title: taskDraft.title,
+          notes: taskDraft.notes,
+          dueAt: taskDraft.dueAt,
+          reminderAt: taskDraft.reminderAt,
+          priority: taskDraft.priority,
+        },
+      });
+      setFriendTaskSuggestionForm(createEmptyFriendTaskSuggestionForm());
+    } catch (friendTaskError) {
+      setError(getErrorMessage(friendTaskError));
+    }
+  };
+
+  const handleFriendTaskEditSuggestionSubmit = async (
+    event: React.FormEvent<HTMLFormElement>,
+  ) => {
+    event.preventDefault();
+    setError(null);
+
+    try {
+      if (!friendTaskEditSuggestionForm.taskTitle.trim()) {
+        throw new Error('Exact task title is required for edit suggestions.');
+      }
+
+      const today = toLocalDateString(new Date());
+      const dueLocalValue = combineLocalDateTimeValue(
+        friendTaskEditSuggestionForm.suggestedDueDate,
+        friendTaskEditSuggestionForm.suggestedDueTime,
+        today,
+        '23:59',
+      );
+      const reminderLocalValue = combineLocalDateTimeValue(
+        friendTaskEditSuggestionForm.suggestedReminderDate,
+        friendTaskEditSuggestionForm.suggestedReminderTime,
+        friendTaskEditSuggestionForm.suggestedReminderDate ||
+          friendTaskEditSuggestionForm.suggestedDueDate ||
+          today,
+        '09:00',
+      );
+      const suggestedDueAt = dueLocalValue ? toIsoValue(dueLocalValue) : undefined;
+      const suggestedReminderAt = reminderLocalValue
+        ? toIsoValue(reminderLocalValue)
+        : undefined;
+      const changedFields = [
+        friendTaskEditSuggestionForm.suggestedTitle.trim() ? 'title' : null,
+        friendTaskEditSuggestionForm.suggestedNotes.trim() ? 'description' : null,
+        suggestedDueAt ? 'due date' : null,
+        suggestedReminderAt ? 'reminder date' : null,
+        friendTaskEditSuggestionForm.suggestedPriority !== 'auto' ? 'priority' : null,
+      ].filter((value): value is string => Boolean(value));
+
+      if (changedFields.length === 0) {
+        throw new Error('Add at least one suggested change.');
+      }
+
+      await window.todoApp.friendNetwork.sendPopup({
+        recipientFriendCode: friendTaskEditSuggestionForm.recipientFriendCode,
+        senderName: friendTaskEditSuggestionForm.senderName,
+        kind: 'task_edit_suggestion',
+        priority: 'normal',
+        title: friendTaskEditSuggestionForm.taskTitle,
+        relatedTaskTitle: friendTaskEditSuggestionForm.taskTitle,
+        message: `Suggested changes: ${changedFields.join(', ')}.`,
+        payload: {
+          taskTitle: friendTaskEditSuggestionForm.taskTitle,
+          suggestedTitle: friendTaskEditSuggestionForm.suggestedTitle,
+          suggestedNotes: friendTaskEditSuggestionForm.suggestedNotes,
+          suggestedDueAt,
+          suggestedReminderAt,
+          suggestedPriority:
+            friendTaskEditSuggestionForm.suggestedPriority === 'auto'
+              ? undefined
+              : friendTaskEditSuggestionForm.suggestedPriority,
+        },
+      });
+      setFriendTaskEditSuggestionForm(createEmptyFriendTaskEditSuggestionForm());
+    } catch (friendTaskError) {
+      setError(getErrorMessage(friendTaskError));
+    }
+  };
+
+  const handleAcceptFriendEvent = async (eventId: string) => {
+    await window.todoApp.friendNetwork.acceptEvent(eventId);
+    await refreshAll();
+  };
+
+  const handleDenyFriendEvent = async (eventId: string) => {
+    await window.todoApp.friendNetwork.denyEvent(eventId);
+    await refreshAll();
+  };
+
+  const handleRecentPasswordSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setError(null);
+
+    try {
+      const isUnlocked = await window.todoApp.friendNetwork.verifyRecentPopupPassword(
+        recentPopupPasswordDraft,
+      );
+
+      if (!isUnlocked) {
+        setError('That recent-popups password did not match.');
+        return;
+      }
+
+      setIsRecentPopupsUnlocked(true);
+      setRecentPopupPasswordDraft('');
+      await refreshAll();
+    } catch (recentPasswordError) {
+      setError(getErrorMessage(recentPasswordError));
+    }
+  };
+
+  const handleSetRecentPasswordSubmit = async (
+    event: React.FormEvent<HTMLFormElement>,
+  ) => {
+    event.preventDefault();
+    setError(null);
+
+    try {
+      const nextStatus = await window.todoApp.friendNetwork.setRecentPopupPassword(
+        newRecentPopupPasswordDraft,
+      );
+      setFriendNetworkStatus(nextStatus);
+      setNewRecentPopupPasswordDraft('');
+      setIsRecentPopupsUnlocked(true);
+      await refreshAll();
+    } catch (recentPasswordError) {
+      setError(getErrorMessage(recentPasswordError));
+    }
+  };
+
   const handleEditRoutine = (template: RoutineTemplate) => {
     setActiveView('routines');
     setEditingRoutineId(template.id);
@@ -2036,43 +3103,74 @@ function MainScreen() {
   const todayLabel = fullDateFormatter.format(new Date());
   const selectedHistoryTitle =
     routines.find((item) => item.template.id === historyRoutineId)?.template.title ?? 'Routine';
+  const pendingSubmissionCount = submissions.length;
+  const pendingEditSuggestionCount = editSuggestions.length;
+  const pendingWebsiteQueueCount = pendingSubmissionCount + pendingEditSuggestionCount;
+  const pendingFriendEventCount = pendingFriendEvents.length;
+  const pendingFriendSuggestionEvents = pendingFriendEvents.filter(
+    (popupEvent) =>
+      popupEvent.kind === 'task_submission' || popupEvent.kind === 'task_edit_suggestion',
+  );
+  const pendingFriendSuggestionCount = pendingFriendSuggestionEvents.length;
+  const queuedFriendPopupCount = pendingFriendEventCount - pendingFriendSuggestionCount;
+  const taskById = new Map(tasks.map((task) => [task.id, task] as const));
+  const isDevVariant = appInfo?.isDevVariant ?? true;
+  const activeThemePalette = getThemePalette(themeSettings);
+
+  const handleThemePresetChange = (presetId: ThemePresetId) => {
+    const nextPreset = THEME_PRESETS.find((preset) => preset.id === presetId);
+
+    onThemeChange({
+      presetId,
+      customBase:
+        presetId === 'custom' ? themeSettings.customBase : nextPreset?.base ?? themeSettings.customBase,
+      customAccent:
+        presetId === 'custom'
+          ? themeSettings.customAccent
+          : nextPreset?.accent ?? themeSettings.customAccent,
+    });
+  };
+
+  const handleCustomThemeColorChange = (
+    key: 'customBase' | 'customAccent',
+    value: string,
+  ) => {
+    onThemeChange({
+      ...themeSettings,
+      presetId: 'custom',
+      [key]: value,
+    });
+  };
 
   const headerTitle =
     activeView === 'today'
       ? todayLabel
+      : activeView === 'planner'
+      ? 'Time-block your day'
       : activeView === 'week'
       ? 'Next 7 days'
       : activeView === 'routines'
       ? 'Repeating work'
-      : 'History and streaks';
+      : activeView === 'history'
+      ? 'History and streaks'
+      : activeView === 'network'
+      ? 'Friend network'
+      : 'Website review queue';
 
   const headerCopy =
     activeView === 'today'
       ? 'See what is still open and decide whether it is due soon or just stays on the list until you finish it.'
+      : activeView === 'planner'
+      ? 'Turn due dates and open tasks into a concrete plan with focus blocks on the calendar.'
       : activeView === 'week'
       ? 'Plan ahead so deadlines and repeating work do not sneak up on you.'
       : activeView === 'routines'
       ? 'Set up tasks that automatically reset themselves when the next cycle arrives.'
-      : 'Look back at passive task completions and routine streaks in one place.';
-
-  const handlePreviewReminder = async () => {
-    setError(null);
-
-    try {
-      await window.todoApp.app.previewReminderPopup();
-    } catch (previewError) {
-      const previewMessage = getErrorMessage(previewError);
-
-      if (previewMessage.includes("No handler registered for 'app:previewReminderPopup'")) {
-        setError(
-          'Preview popup needs one full app restart because it is created by Electron main process code. Close and reopen the app, then try Preview reminder again.',
-        );
-        return;
-      }
-
-      setError(previewMessage);
-    }
-  };
+      : activeView === 'history'
+      ? 'Look back at passive task completions and routine streaks in one place.'
+      : activeView === 'network'
+      ? 'Set your friend code, control DND, and send popup messages to other installed apps.'
+      : 'Review website-submitted tasks and edit suggestions here before they touch your real planner.';
 
   return (
     <main className="app-shell">
@@ -2081,6 +3179,9 @@ function MainScreen() {
           <div className="sidebar-brand">
             <p className="section-kicker">To Do List</p>
             <h1>Desktop Planner</h1>
+            <span className="status-chip accent">
+              {appInfo?.variant === 'user' ? 'user build' : 'dev build'}
+            </span>
             <p className="section-copy">
               Use the mini window for quick capture, then open the full app when you want a broader view.
             </p>
@@ -2093,6 +3194,13 @@ function MainScreen() {
               onClick={() => setActiveView('today')}
             >
               Today
+            </button>
+            <button
+              className={`sidebar-link ${activeView === 'planner' ? 'is-active' : ''}`}
+              type="button"
+              onClick={() => setActiveView('planner')}
+            >
+              Planner
             </button>
             <button
               className={`sidebar-link ${activeView === 'week' ? 'is-active' : ''}`}
@@ -2114,6 +3222,26 @@ function MainScreen() {
               onClick={() => setActiveView('history')}
             >
               History
+            </button>
+            {isDevVariant ? (
+              <button
+                className={`sidebar-link ${activeView === 'submissions' ? 'is-active' : ''}`}
+                type="button"
+                onClick={() => setActiveView('submissions')}
+              >
+                {pendingWebsiteQueueCount
+                  ? `Website queue (${pendingWebsiteQueueCount})`
+                  : 'Website queue'}
+              </button>
+            ) : null}
+            <button
+              className={`sidebar-link ${activeView === 'network' ? 'is-active' : ''}`}
+              type="button"
+              onClick={() => setActiveView('network')}
+            >
+              {pendingFriendEventCount
+                ? `Friend network (${pendingFriendEventCount})`
+                : 'Friend network'}
             </button>
           </div>
 
@@ -2141,6 +3269,61 @@ function MainScreen() {
             </div>
           </div>
 
+          <div className="theme-card">
+            <div>
+              <p className="section-kicker">Theme</p>
+              <h2>{activeThemePalette.label}</h2>
+            </div>
+
+            <div className="theme-swatches" aria-hidden="true">
+              <span style={{ background: activeThemePalette.base }} />
+              <span style={{ background: activeThemePalette.accent }} />
+            </div>
+
+            <label className="field compact-field" htmlFor="theme-preset">
+              Palette
+              <select
+                id="theme-preset"
+                value={themeSettings.presetId}
+                onChange={(event) => {
+                  handleThemePresetChange(event.target.value as ThemePresetId);
+                }}
+              >
+                {THEME_PRESETS.map((preset) => (
+                  <option key={preset.id} value={preset.id}>
+                    {preset.label}
+                  </option>
+                ))}
+                <option value="custom">Custom</option>
+              </select>
+            </label>
+
+            <div className="theme-color-grid">
+              <label className="field compact-field" htmlFor="theme-base">
+                Base
+                <input
+                  id="theme-base"
+                  type="color"
+                  value={themeSettings.customBase}
+                  onChange={(event) =>
+                    handleCustomThemeColorChange('customBase', event.target.value)
+                  }
+                />
+              </label>
+              <label className="field compact-field" htmlFor="theme-accent">
+                Highlight
+                <input
+                  id="theme-accent"
+                  type="color"
+                  value={themeSettings.customAccent}
+                  onChange={(event) =>
+                    handleCustomThemeColorChange('customAccent', event.target.value)
+                  }
+                />
+              </label>
+            </div>
+          </div>
+
           <button
             className="soft-button primary sidebar-launch"
             type="button"
@@ -2162,26 +3345,23 @@ function MainScreen() {
               <p className="section-kicker">
                 {activeView === 'today'
                   ? 'Today'
+                  : activeView === 'planner'
+                  ? 'Planner'
                   : activeView === 'week'
                   ? 'Week'
                   : activeView === 'routines'
                   ? 'Routines'
-                  : 'History'}
+                  : activeView === 'history'
+                  ? 'History'
+                  : activeView === 'network'
+                  ? 'Friend network'
+                  : 'Website queue'}
               </p>
               <h2>{headerTitle}</h2>
               <p className="section-copy">{headerCopy}</p>
             </div>
 
             <div className="header-actions">
-              <button
-                className="soft-button"
-                type="button"
-                onClick={() => {
-                  void handlePreviewReminder();
-                }}
-              >
-                Preview reminder
-              </button>
               <button
                 className="soft-button primary"
                 type="button"
@@ -2195,6 +3375,121 @@ function MainScreen() {
           </header>
 
           {error ? <div className="banner">{error}</div> : null}
+
+          <section className="panel-card account-card">
+            <div className="panel-top">
+              <div>
+                <p className="section-kicker">Sync account</p>
+                <h3>
+                  {accountStatus?.session
+                    ? `Signed in as ${accountStatus.session.username}`
+                    : 'Sign in to sync across devices'}
+                </h3>
+                <p className="section-copy">
+                  Username and password sync your tasks, routines, and saved friend contacts through Supabase.
+                </p>
+              </div>
+              <span className={`status-chip ${accountStatus?.session ? 'success' : 'muted'}`}>
+                {accountStatus?.session ? 'sync on' : 'local only'}
+              </span>
+            </div>
+
+            {!accountStatus?.isConfigured ? (
+              <p className="empty-state">
+                Account sync tables are not ready yet. Run the Supabase account-sync SQL, then restart.
+              </p>
+            ) : accountStatus.session ? (
+              <div className="row-actions">
+                <button
+                  className="soft-button primary"
+                  type="button"
+                  onClick={() => {
+                    void handleAccountSyncNow();
+                  }}
+                >
+                  Sync now
+                </button>
+                <button
+                  className="soft-button"
+                  type="button"
+                  onClick={() => {
+                    void handleAccountSignOut();
+                  }}
+                >
+                  Sign out
+                </button>
+                {accountStatus.lastSyncedAt ? (
+                  <span className="field-hint">
+                    Last sync {formatDateTime(accountStatus.lastSyncedAt)}
+                  </span>
+                ) : null}
+              </div>
+            ) : (
+              <form
+                className="composer-form"
+                onSubmit={(event) => {
+                  void handleAccountSubmit(event, 'signIn');
+                }}
+              >
+                <div className="split-fields">
+                  <div className="field">
+                    <label htmlFor="sync-username">Username</label>
+                    <input
+                      id="sync-username"
+                      value={accountForm.username}
+                      maxLength={40}
+                      onChange={(event) =>
+                        setAccountForm((current) => ({
+                          ...current,
+                          username: event.target.value,
+                        }))
+                      }
+                    />
+                  </div>
+                  <div className="field">
+                    <label htmlFor="sync-password">Password</label>
+                    <input
+                      id="sync-password"
+                      type="password"
+                      value={accountForm.password}
+                      maxLength={128}
+                      onChange={(event) =>
+                        setAccountForm((current) => ({
+                          ...current,
+                          password: event.target.value,
+                        }))
+                      }
+                    />
+                  </div>
+                </div>
+                <div className="row-actions">
+                  <button className="soft-button primary" type="submit">
+                    Sign in
+                  </button>
+                  <button
+                    className="soft-button"
+                    type="button"
+                    onClick={() => {
+                      void window.todoApp.account
+                        .signUp(accountForm)
+                        .then(async (nextStatus) => {
+                          setAccountStatus(nextStatus);
+                          setAccountForm({ username: '', password: '' });
+                          await refreshAll();
+                        })
+                        .catch((accountError) => setError(getErrorMessage(accountError)));
+                    }}
+                  >
+                    Create account
+                  </button>
+                </div>
+              </form>
+            )}
+
+            {accountStatus?.syncError ? (
+              <p className="field-hint danger-text">{accountStatus.syncError}</p>
+            ) : null}
+          </section>
 
           {activeView === 'today' ? (
             <>
@@ -2403,6 +3698,351 @@ function MainScreen() {
                 ) : null}
               </section>
             </>
+          ) : null}
+
+          {activeView === 'planner' ? (
+            <div className="planner-layout">
+              <section className="panel-card planner-calendar">
+                <div className="panel-top">
+                  <div>
+                    <p className="section-kicker">Daily planner</p>
+                    <h3>{formatDateOnly(plannerDate)}</h3>
+                    <p className="section-copy">
+                      Due tasks stay visible here until you decide when the work actually fits.
+                    </p>
+                  </div>
+                  <div className="history-nav">
+                    <button
+                      className="soft-button"
+                      type="button"
+                      onClick={() => {
+                        const nextDate = addDaysToDateString(plannerDate, -1);
+                        setPlannerDate(nextDate);
+                        setTimeBlockForm((current) => ({ ...current, date: nextDate }));
+                      }}
+                    >
+                      Prev
+                    </button>
+                    <input
+                      className="planner-date-input"
+                      type="date"
+                      value={plannerDate}
+                      onChange={(event) => {
+                        setPlannerDate(event.target.value);
+                        setTimeBlockForm((current) => ({
+                          ...current,
+                          date: event.target.value,
+                        }));
+                      }}
+                    />
+                    <button
+                      className="soft-button"
+                      type="button"
+                      onClick={() => {
+                        const nextDate = addDaysToDateString(plannerDate, 1);
+                        setPlannerDate(nextDate);
+                        setTimeBlockForm((current) => ({ ...current, date: nextDate }));
+                      }}
+                    >
+                      Next
+                    </button>
+                  </div>
+                </div>
+
+                <div className="planner-score">
+                  <span className="status-chip accent">{Math.round(plannerMinutes)} min planned</span>
+                  <span className="status-chip success">
+                    {plannerBlocks.filter((block) => block.status === 'completed').length} done
+                  </span>
+                  <span className="status-chip muted">{dueTasksForPlannerDate.length} due</span>
+                  <span className="status-chip muted">{unplannedTasks.length} unplanned</span>
+                </div>
+
+                <div className="planner-deadlines">
+                  <div className="mini-section-head">
+                    <h4>Due on this date</h4>
+                  </div>
+                  {dueTasksForPlannerDate.length === 0 ? (
+                    <p className="empty-state">No task deadlines land on this date.</p>
+                  ) : (
+                    dueTasksForPlannerDate.map((task) => (
+                      <button
+                        key={task.id}
+                        className="deadline-chip"
+                        type="button"
+                        onClick={() => setSelectedTaskId(task.id)}
+                      >
+                        {task.title}
+                      </button>
+                    ))
+                  )}
+                </div>
+
+                <div
+                  className="time-block-stack"
+                  onDragOver={(event) => event.preventDefault()}
+                  onDrop={(event) => {
+                    event.preventDefault();
+                    planDroppedTask(event.dataTransfer.getData('text/task-id'));
+                  }}
+                >
+                  {plannerBlocks.length === 0 ? (
+                    <p className="empty-state">
+                      No blocks planned yet. Dragging is a future polish pass; for now use the
+                      compact block form or plan an open task from the right.
+                    </p>
+                  ) : (
+                    plannerBlocks.map((block) => {
+                      const linkedTask = tasks.find((task) => task.id === block.taskId);
+                      const hasConflict = plannerBlocks.some(
+                        (candidate) =>
+                          candidate.id !== block.id &&
+                          candidate.startAt < block.endAt &&
+                          candidate.endAt > block.startAt,
+                      );
+
+                      return (
+                        <article
+                          key={block.id}
+                          className={`time-block-card is-${block.status}${
+                            hasConflict ? ' has-conflict' : ''
+                          }`}
+                        >
+                          <div>
+                            <div className="row-title">
+                              {formatDateTime(block.startAt)} to{' '}
+                              {new Intl.DateTimeFormat(undefined, {
+                                hour: 'numeric',
+                                minute: '2-digit',
+                              }).format(new Date(block.endAt))}
+                            </div>
+                            <h4>{block.title}</h4>
+                            <p className="row-meta">
+                              {linkedTask ? `Linked task: ${linkedTask.title}` : 'Focus block'}
+                              {block.enableDnd ? ' | DND-ready focus block' : ''}
+                              {hasConflict ? ' | overlaps another block' : ''}
+                            </p>
+                            {block.notes ? <p className="row-note">{block.notes}</p> : null}
+                          </div>
+                          <div className="row-actions">
+                            {block.status !== 'completed' ? (
+                              <button
+                                className="soft-button primary"
+                                type="button"
+                                onClick={() => void handleTimeBlockStatus(block, 'completed')}
+                              >
+                                Done
+                              </button>
+                            ) : null}
+                            {block.status !== 'missed' ? (
+                              <button
+                                className="soft-button"
+                                type="button"
+                                onClick={() => void handleTimeBlockStatus(block, 'missed')}
+                              >
+                                Missed
+                              </button>
+                            ) : null}
+                            <button
+                              className="soft-button"
+                              type="button"
+                              onClick={() => void handleMoveTimeBlock(block, 60)}
+                            >
+                              Move +1h
+                            </button>
+                            <button
+                              className="link-button"
+                              type="button"
+                              onClick={() => void handleDeleteTimeBlock(block.id)}
+                            >
+                              Delete
+                            </button>
+                          </div>
+                        </article>
+                      );
+                    })
+                  )}
+                </div>
+              </section>
+
+              <section className="panel-card planner-side">
+                <div>
+                  <p className="section-kicker">Plan a block</p>
+                  <h3>Put work on the clock</h3>
+                </div>
+                <form className="composer-form" onSubmit={handleTimeBlockSubmit}>
+                  <div className="field">
+                    <label htmlFor="block-title">Block title</label>
+                    <input
+                      id="block-title"
+                      value={timeBlockForm.title}
+                      placeholder="Deep work on report"
+                      onChange={(event) =>
+                        setTimeBlockForm((current) => ({
+                          ...current,
+                          title: event.target.value,
+                        }))
+                      }
+                    />
+                  </div>
+                  <div className="field">
+                    <label htmlFor="block-task">Linked task</label>
+                    <select
+                      id="block-task"
+                      value={timeBlockForm.taskId}
+                      onChange={(event) => {
+                        const linkedTask = tasks.find((task) => task.id === event.target.value);
+                        setTimeBlockForm((current) => ({
+                          ...current,
+                          taskId: event.target.value,
+                          title: current.title || linkedTask?.title || '',
+                        }));
+                      }}
+                    >
+                      <option value="">No linked task</option>
+                      {pendingTasks.map((task) => (
+                        <option key={task.id} value={task.id}>
+                          {task.title}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="three-fields">
+                    <div className="field">
+                      <label htmlFor="block-date">Date</label>
+                      <input
+                        id="block-date"
+                        type="date"
+                        value={timeBlockForm.date}
+                        onChange={(event) =>
+                          setTimeBlockForm((current) => ({
+                            ...current,
+                            date: event.target.value,
+                          }))
+                        }
+                      />
+                    </div>
+                    <div className="field">
+                      <label htmlFor="block-start">Start</label>
+                      <input
+                        id="block-start"
+                        type="time"
+                        value={timeBlockForm.startTime}
+                        onChange={(event) =>
+                          setTimeBlockForm((current) => ({
+                            ...current,
+                            startTime: event.target.value,
+                          }))
+                        }
+                      />
+                    </div>
+                    <div className="field">
+                      <label htmlFor="block-end">End</label>
+                      <input
+                        id="block-end"
+                        type="time"
+                        value={timeBlockForm.endTime}
+                        onChange={(event) =>
+                          setTimeBlockForm((current) => ({
+                            ...current,
+                            endTime: event.target.value,
+                          }))
+                        }
+                      />
+                    </div>
+                  </div>
+                  <label className="inline-check">
+                    <input
+                      type="checkbox"
+                      checked={timeBlockForm.enableDnd}
+                      onChange={(event) =>
+                        setTimeBlockForm((current) => ({
+                          ...current,
+                          enableDnd: event.target.checked,
+                        }))
+                      }
+                    />
+                    Mark as a DND-ready focus block
+                  </label>
+                  <button className="soft-button primary" type="submit" disabled={isSubmitting}>
+                    Add block
+                  </button>
+                </form>
+
+                <div className="planner-inbox">
+                  <div className="mini-section-head">
+                    <h4>Unplanned task inbox</h4>
+                  </div>
+                  {unplannedTasks.slice(0, 7).map((task) => (
+                    <article
+                      key={task.id}
+                      className="planner-task"
+                      draggable
+                      onDragStart={(event) =>
+                        event.dataTransfer.setData('text/task-id', task.id)
+                      }
+                    >
+                      <div>
+                        <div className="row-title">{task.title}</div>
+                        <div className="row-meta">
+                          {task.dueAt ? `Due ${formatDateTime(task.dueAt)}` : 'No deadline'}
+                        </div>
+                      </div>
+                      <button
+                        className="soft-button"
+                        type="button"
+                        onClick={() => void planTaskForDate(task)}
+                      >
+                        Plan
+                      </button>
+                    </article>
+                  ))}
+                </div>
+              </section>
+
+              <section className="panel-card planner-week">
+                <div>
+                  <p className="section-kicker">Week sketch</p>
+                  <h3>Blocks and deadlines at a glance</h3>
+                </div>
+                <div className="week-grid">
+                  {plannerWeekDates.map((dateValue) => {
+                    const blocksForDate = timeBlocks.filter(
+                      (block) => toLocalDateString(new Date(block.startAt)) === dateValue,
+                    );
+                    const dueForDate = pendingTasks.filter(
+                      (task) =>
+                        task.dueAt && toLocalDateString(new Date(task.dueAt)) === dateValue,
+                    );
+
+                    return (
+                      <button
+                        key={dateValue}
+                        className={`week-card planner-week-card${
+                          dateValue === plannerDate ? ' is-today' : ''
+                        }`}
+                        type="button"
+                        onClick={() => {
+                          setPlannerDate(dateValue);
+                          setTimeBlockForm((current) => ({ ...current, date: dateValue }));
+                        }}
+                        onDragOver={(event) => event.preventDefault()}
+                        onDrop={(event) => {
+                          event.preventDefault();
+                          planDroppedTask(event.dataTransfer.getData('text/task-id'), dateValue);
+                        }}
+                      >
+                        <div className="week-card-header">
+                          <div className="week-card-title">{formatDateOnly(dateValue)}</div>
+                          <span className="status-chip muted">{blocksForDate.length} blocks</span>
+                        </div>
+                        <p className="row-meta">{dueForDate.length} due tasks</p>
+                      </button>
+                    );
+                  })}
+                </div>
+              </section>
+            </div>
           ) : null}
 
           {activeView === 'week' ? (
@@ -2999,6 +4639,878 @@ function MainScreen() {
               )}
             </section>
           ) : null}
+
+          {activeView === 'submissions' && isDevVariant ? (
+            <section className="panel-card">
+              <div className="panel-top">
+                <div>
+                  <p className="section-kicker">Website queue</p>
+                  <h3>Review suggestions before they touch your workflow</h3>
+                </div>
+                <span className={`status-chip ${pendingWebsiteQueueCount ? 'danger' : 'muted'}`}>
+                  {pendingWebsiteQueueCount} pending
+                </span>
+              </div>
+
+              {pendingWebsiteQueueCount === 0 ? (
+                <p className="empty-state">
+                  Website-submitted tasks and edit suggestions will appear here. Accept only applies
+                  them after you review them, and dismiss keeps them out of your planner.
+                </p>
+              ) : (
+                <div className="list-stack">
+                  <section className="details-panel">
+                    <div className="panel-top">
+                      <div>
+                        <p className="section-kicker">New tasks</p>
+                        <h4>Suggestions that could become real tasks</h4>
+                      </div>
+                      <span
+                        className={`status-chip ${pendingSubmissionCount ? 'danger' : 'muted'}`}
+                      >
+                        {pendingSubmissionCount}
+                      </span>
+                    </div>
+
+                    {submissions.length === 0 ? (
+                      <p className="empty-state">No pending new-task suggestions right now.</p>
+                    ) : (
+                      <div className="list-stack">
+                        {submissions.map((submission) => (
+                          <SubmissionRow
+                            key={submission.id}
+                            submission={submission}
+                            onAccept={handleAcceptSubmission}
+                            onDismiss={handleDismissSubmission}
+                          />
+                        ))}
+                      </div>
+                    )}
+                  </section>
+
+                  <section className="details-panel">
+                    <div className="panel-top">
+                      <div>
+                        <p className="section-kicker">Task edits</p>
+                        <h4>Suggested changes to existing local tasks</h4>
+                      </div>
+                      <span
+                        className={`status-chip ${
+                          pendingEditSuggestionCount ? 'accent' : 'muted'
+                        }`}
+                      >
+                        {pendingEditSuggestionCount}
+                      </span>
+                    </div>
+
+                    {editSuggestions.length === 0 ? (
+                      <p className="empty-state">No pending task-edit suggestions right now.</p>
+                    ) : (
+                      <div className="list-stack">
+                        {editSuggestions.map((suggestion) => (
+                          <TaskEditSuggestionRow
+                            key={suggestion.id}
+                            suggestion={suggestion}
+                            currentTask={taskById.get(suggestion.localTaskId)}
+                            onAccept={handleAcceptEditSuggestion}
+                            onDismiss={handleDismissEditSuggestion}
+                          />
+                        ))}
+                      </div>
+                    )}
+                  </section>
+                </div>
+              )}
+            </section>
+          ) : null}
+
+          {activeView === 'network' ? (
+            <section className="panel-card">
+              <div className="panel-top">
+                <div>
+                  <p className="section-kicker">Friend network</p>
+                  <h3>Installed-app popups between friends</h3>
+                  <p className="section-copy">
+                    Save friends, exchange popups, and suggest tasks without letting anything touch
+                    a planner until the recipient accepts it.
+                  </p>
+                </div>
+                <span
+                  className={`status-chip ${
+                    friendNetworkStatus?.isConfigured ? 'success' : 'danger'
+                  }`}
+                >
+                  {friendNetworkStatus?.isConfigured ? 'connected' : 'needs setup'}
+                </span>
+              </div>
+
+              <div className="list-stack">
+                <section className="details-panel">
+                  <div className="panel-top">
+                    <div>
+                      <p className="section-kicker">This app</p>
+                      <h4>{friendNetworkStatus?.deviceName ?? 'Local device'}</h4>
+                      <p className="field-hint">
+                        Device ID: {friendNetworkStatus?.deviceKey ?? 'Not loaded yet'}
+                      </p>
+                      {friendNetworkStatus?.profileName ? (
+                        <p className="field-hint">
+                          Local test profile: {friendNetworkStatus.profileName}
+                        </p>
+                      ) : null}
+                    </div>
+                    <span className="status-chip accent">
+                      {friendCodes[0]?.code ?? 'no code yet'}
+                    </span>
+                  </div>
+
+                  {!friendNetworkStatus?.isConfigured ? (
+                    <p className="empty-state">
+                      Friend network tables are not ready yet. Run the Supabase SQL from this repo,
+                      then restart the app.
+                    </p>
+                  ) : null}
+
+                  <form className="composer-form" onSubmit={handleFriendCodeSubmit}>
+                    <div className="field">
+                      <label htmlFor="friend-code">Set a friend code</label>
+                      <input
+                        id="friend-code"
+                        value={friendCodeDraft}
+                        maxLength={64}
+                        placeholder="Any unique code, up to 64 characters"
+                        onChange={(event) => setFriendCodeDraft(event.target.value)}
+                      />
+                      <p className="field-hint">
+                        Old codes keep forwarding to this device, so changing your code will not
+                        break older shared codes.
+                      </p>
+                    </div>
+                    <button className="soft-button primary" type="submit">
+                      Save friend code
+                    </button>
+                  </form>
+
+                  {friendCodes.length ? (
+                    <div className="history-chips">
+                      {friendCodes.slice(0, 3).map((friendCode) => (
+                        <span key={friendCode.id} className="status-chip muted">
+                          {friendCode.code}
+                        </span>
+                      ))}
+                      {friendCodes.length > 3 ? (
+                        <span className="status-chip muted">
+                          +{friendCodes.length - 3} older
+                        </span>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </section>
+
+                <section className="details-panel">
+                  <div className="panel-top">
+                    <div>
+                      <p className="section-kicker">Saved friends</p>
+                      <h4>Nicknames and reusable friend codes</h4>
+                      <p className="field-hint">
+                        Contacts sync with your account. If a saved code stops existing, it will be
+                        removed automatically the next time contacts refresh.
+                      </p>
+                    </div>
+                    <span className="status-chip muted">{friendContacts.length} saved</span>
+                  </div>
+
+                  {!accountStatus?.session ? (
+                    <p className="empty-state">Sign in to save friend codes across devices.</p>
+                  ) : (
+                    <form className="composer-form" onSubmit={handleFriendContactSubmit}>
+                      <div className="split-fields">
+                        <div className="field">
+                          <label htmlFor="friend-contact-nickname">Nickname</label>
+                          <input
+                            id="friend-contact-nickname"
+                            value={friendContactForm.nickname}
+                            maxLength={60}
+                            placeholder="Ally"
+                            onChange={(event) =>
+                              setFriendContactForm((current) => ({
+                                ...current,
+                                nickname: event.target.value,
+                              }))
+                            }
+                          />
+                        </div>
+                        <div className="field">
+                          <label htmlFor="friend-contact-code">Friend code</label>
+                          <input
+                            id="friend-contact-code"
+                            value={friendContactForm.friendCode}
+                            maxLength={64}
+                            placeholder="Their current or older code"
+                            onChange={(event) =>
+                              setFriendContactForm((current) => ({
+                                ...current,
+                                friendCode: event.target.value,
+                              }))
+                            }
+                          />
+                        </div>
+                      </div>
+                      <button className="soft-button primary" type="submit">
+                        Save friend
+                      </button>
+                    </form>
+                  )}
+
+                  {friendContacts.length ? (
+                    <div className="list-stack">
+                      {friendContacts.map((contact) => (
+                        <article key={contact.id} className="history-row compact-row">
+                          <div>
+                            <div className="row-title">{contact.nickname}</div>
+                            <div className="row-meta">{contact.friendCode}</div>
+                          </div>
+                          <button
+                            className="soft-button"
+                            type="button"
+                            onClick={() => {
+                              void handleFriendContactDelete(contact.id);
+                            }}
+                          >
+                            Remove
+                          </button>
+                        </article>
+                      ))}
+                    </div>
+                  ) : null}
+                </section>
+
+                <section className="details-panel">
+                  <div className="panel-top">
+                    <div>
+                      <p className="section-kicker">Do not disturb</p>
+                      <h4>Control what turns into a popup</h4>
+                    </div>
+                    <span className="status-chip accent">
+                      {friendNetworkStatus?.dndMode ?? 'off'}
+                    </span>
+                  </div>
+
+                  <div className="picker-row">
+                    {(['off', 'quiet', 'full'] as AppDndMode[]).map((mode) => (
+                      <button
+                        key={mode}
+                        className={`picker-chip ${
+                          friendNetworkStatus?.dndMode === mode ? 'is-active' : ''
+                        }`}
+                        type="button"
+                        onClick={() => {
+                          void handleDndModeChange(mode);
+                        }}
+                      >
+                        {mode === 'off'
+                          ? 'Off'
+                          : mode === 'quiet'
+                          ? 'Quiet'
+                          : 'Full DND'}
+                      </button>
+                    ))}
+                  </div>
+
+                  <p className="field-hint">
+                    Quiet queues normal popups and suggestions but lets emergency popups through.
+                    Full DND queues everything until you turn DND off.
+                  </p>
+                </section>
+
+                <section className="details-panel">
+                  <div className="panel-top">
+                    <div>
+                      <p className="section-kicker">Friend review queue</p>
+                      <h4>Task suggestions waiting for a decision</h4>
+                    </div>
+                    <span
+                      className={`status-chip ${pendingFriendSuggestionCount ? 'danger' : 'muted'}`}
+                    >
+                      {pendingFriendSuggestionCount} pending
+                    </span>
+                  </div>
+
+                  {pendingFriendSuggestionEvents.length === 0 ? (
+                    <p className="empty-state">
+                      Friend task suggestions and edit suggestions will wait here until you accept
+                      or deny them.
+                    </p>
+                  ) : (
+                    <div className="list-stack">
+                      {pendingFriendSuggestionEvents.map((popupEvent) => (
+                        <article key={popupEvent.id} className="history-row">
+                          <div>
+                            <div className="row-title">
+                              {popupEvent.title ??
+                                popupEvent.relatedTaskTitle ??
+                                popupEvent.kind}
+                            </div>
+                            <div className="row-meta">
+                              {formatDateTime(popupEvent.createdAt)} · {popupEvent.kind}
+                              {popupEvent.senderName ? ` · ${popupEvent.senderName}` : ''}
+                            </div>
+                            <p className="row-note">{popupEvent.message}</p>
+                          </div>
+                          <div className="row-actions">
+                            {popupEvent.kind === 'task_submission' ||
+                            popupEvent.kind === 'task_edit_suggestion' ? (
+                              <button
+                                className="soft-button primary"
+                                type="button"
+                                onClick={() => {
+                                  void handleAcceptFriendEvent(popupEvent.id);
+                                }}
+                              >
+                                Accept
+                              </button>
+                            ) : null}
+                            <button
+                              className="soft-button"
+                              type="button"
+                              onClick={() => {
+                                void handleDenyFriendEvent(popupEvent.id);
+                              }}
+                            >
+                              Deny
+                            </button>
+                          </div>
+                        </article>
+                      ))}
+                    </div>
+                  )}
+                </section>
+
+                <section className="details-panel">
+                  <div className="panel-top">
+                    <div>
+                      <p className="section-kicker">Send popup</p>
+                      <h4>Test app-to-app delivery</h4>
+                    </div>
+                    <span className="status-chip muted">
+                      {queuedFriendPopupCount} queued messages
+                    </span>
+                  </div>
+
+                  <form className="composer-form" onSubmit={handleFriendPopupSubmit}>
+                    <div className="split-fields">
+                      <div className="field">
+                        <label htmlFor="recipient-code">Recipient friend code</label>
+                        <input
+                          id="recipient-code"
+                          value={friendPopupForm.recipientFriendCode}
+                          maxLength={64}
+                          onChange={(event) =>
+                            setFriendPopupForm((current) => ({
+                              ...current,
+                              recipientFriendCode: event.target.value,
+                            }))
+                          }
+                        />
+                        {friendContacts.length ? (
+                          <div className="contact-chip-row">
+                            {friendContacts.map((contact) => (
+                              <button
+                                key={contact.id}
+                                className="picker-chip"
+                                type="button"
+                                onClick={() => applyContactToPopupForm(contact)}
+                              >
+                                {contact.nickname}
+                              </button>
+                            ))}
+                          </div>
+                        ) : null}
+                      </div>
+                      <div className="field">
+                        <label htmlFor="sender-name">Sender name</label>
+                        <input
+                          id="sender-name"
+                          value={friendPopupForm.senderName}
+                          maxLength={80}
+                          placeholder="Optional"
+                          onChange={(event) =>
+                            setFriendPopupForm((current) => ({
+                              ...current,
+                              senderName: event.target.value,
+                            }))
+                          }
+                        />
+                      </div>
+                    </div>
+
+                    <div className="field">
+                      <label htmlFor="friend-message">Message</label>
+                      <textarea
+                        id="friend-message"
+                        value={friendPopupForm.message}
+                        maxLength={4000}
+                        onChange={(event) =>
+                          setFriendPopupForm((current) => ({
+                            ...current,
+                            message: event.target.value,
+                          }))
+                        }
+                      />
+                    </div>
+
+                    <label className="inline-check">
+                      <input
+                        type="checkbox"
+                        checked={friendPopupForm.isEmergency}
+                        onChange={(event) =>
+                          setFriendPopupForm((current) => ({
+                            ...current,
+                            isEmergency: event.target.checked,
+                          }))
+                        }
+                      />
+                      Send as emergency mega popup
+                    </label>
+
+                    {friendPopupForm.isEmergency ? (
+                      <div className="field">
+                        <label htmlFor="friend-emergency-password">Emergency password</label>
+                        <input
+                          id="friend-emergency-password"
+                          type="password"
+                          value={friendPopupForm.emergencyPassword}
+                          placeholder="Required for emergency mega popups"
+                          onChange={(event) =>
+                            setFriendPopupForm((current) => ({
+                              ...current,
+                              emergencyPassword: event.target.value,
+                            }))
+                          }
+                        />
+                      </div>
+                    ) : null}
+
+                    <button className="soft-button primary" type="submit">
+                      Send popup
+                    </button>
+                  </form>
+                </section>
+
+                <section className="details-panel">
+                  <div className="panel-top">
+                    <div>
+                      <p className="section-kicker">Suggest task</p>
+                      <h4>Send a task for a friend to accept or deny</h4>
+                    </div>
+                    <span className="status-chip muted">reviewed by them</span>
+                  </div>
+
+                  <form className="composer-form" onSubmit={handleFriendTaskSuggestionSubmit}>
+                    <div className="split-fields">
+                      <div className="field">
+                        <label htmlFor="task-suggestion-recipient">Recipient friend code</label>
+                        <input
+                          id="task-suggestion-recipient"
+                          value={friendTaskSuggestionForm.recipientFriendCode}
+                          maxLength={64}
+                          onChange={(event) =>
+                            setFriendTaskSuggestionForm((current) => ({
+                              ...current,
+                              recipientFriendCode: event.target.value,
+                            }))
+                          }
+                        />
+                        {friendContacts.length ? (
+                          <div className="contact-chip-row">
+                            {friendContacts.map((contact) => (
+                              <button
+                                key={contact.id}
+                                className="picker-chip"
+                                type="button"
+                                onClick={() => applyContactToTaskSuggestionForm(contact)}
+                              >
+                                {contact.nickname}
+                              </button>
+                            ))}
+                          </div>
+                        ) : null}
+                      </div>
+                      <div className="field">
+                        <label htmlFor="task-suggestion-sender">Sender name</label>
+                        <input
+                          id="task-suggestion-sender"
+                          value={friendTaskSuggestionForm.senderName}
+                          maxLength={80}
+                          placeholder="Optional"
+                          onChange={(event) =>
+                            setFriendTaskSuggestionForm((current) => ({
+                              ...current,
+                              senderName: event.target.value,
+                            }))
+                          }
+                        />
+                      </div>
+                    </div>
+
+                    <div className="field">
+                      <label htmlFor="task-suggestion-title">Task title</label>
+                      <input
+                        id="task-suggestion-title"
+                        value={friendTaskSuggestionForm.title}
+                        maxLength={160}
+                        onChange={(event) =>
+                          setFriendTaskSuggestionForm((current) => ({
+                            ...current,
+                            title: event.target.value,
+                          }))
+                        }
+                      />
+                    </div>
+
+                    <div className="field">
+                      <label htmlFor="task-suggestion-notes">Description</label>
+                      <textarea
+                        id="task-suggestion-notes"
+                        value={friendTaskSuggestionForm.notes}
+                        onChange={(event) =>
+                          setFriendTaskSuggestionForm((current) => ({
+                            ...current,
+                            notes: event.target.value,
+                          }))
+                        }
+                      />
+                    </div>
+
+                    <div className="three-fields">
+                      <div className="field">
+                        <label htmlFor="task-suggestion-due-date">Due date</label>
+                        <input
+                          id="task-suggestion-due-date"
+                          type="date"
+                          value={friendTaskSuggestionForm.dueDate}
+                          onChange={(event) =>
+                            setFriendTaskSuggestionForm((current) => ({
+                              ...current,
+                              dueDate: event.target.value,
+                            }))
+                          }
+                        />
+                      </div>
+                      <div className="field">
+                        <label htmlFor="task-suggestion-reminder-date">Reminder date</label>
+                        <input
+                          id="task-suggestion-reminder-date"
+                          type="date"
+                          value={friendTaskSuggestionForm.reminderDate}
+                          onChange={(event) =>
+                            setFriendTaskSuggestionForm((current) => ({
+                              ...current,
+                              reminderDate: event.target.value,
+                            }))
+                          }
+                        />
+                      </div>
+                      <div className="field">
+                        <label htmlFor="task-suggestion-priority">Priority</label>
+                        <select
+                          id="task-suggestion-priority"
+                          value={friendTaskSuggestionForm.priority}
+                          onChange={(event) =>
+                            setFriendTaskSuggestionForm((current) => ({
+                              ...current,
+                              priority: event.target.value as TaskPriority,
+                            }))
+                          }
+                        >
+                          {TASK_PRIORITY_OPTIONS.map((option) => (
+                            <option key={option.value} value={option.value}>
+                              {option.label}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+
+                    <button className="soft-button primary" type="submit">
+                      Send task suggestion
+                    </button>
+                  </form>
+                </section>
+
+                <section className="details-panel">
+                  <div className="panel-top">
+                    <div>
+                      <p className="section-kicker">Suggest edit</p>
+                      <h4>Ask a friend to change one of their tasks</h4>
+                      <p className="field-hint">
+                        First pass uses the task title as the target. The recipient can accept only
+                        if exactly one local task matches.
+                      </p>
+                    </div>
+                    <span className="status-chip muted">by title</span>
+                  </div>
+
+                  <form className="composer-form" onSubmit={handleFriendTaskEditSuggestionSubmit}>
+                    <div className="split-fields">
+                      <div className="field">
+                        <label htmlFor="task-edit-recipient">Recipient friend code</label>
+                        <input
+                          id="task-edit-recipient"
+                          value={friendTaskEditSuggestionForm.recipientFriendCode}
+                          maxLength={64}
+                          onChange={(event) =>
+                            setFriendTaskEditSuggestionForm((current) => ({
+                              ...current,
+                              recipientFriendCode: event.target.value,
+                            }))
+                          }
+                        />
+                        {friendContacts.length ? (
+                          <div className="contact-chip-row">
+                            {friendContacts.map((contact) => (
+                              <button
+                                key={contact.id}
+                                className="picker-chip"
+                                type="button"
+                                onClick={() => applyContactToTaskEditSuggestionForm(contact)}
+                              >
+                                {contact.nickname}
+                              </button>
+                            ))}
+                          </div>
+                        ) : null}
+                      </div>
+                      <div className="field">
+                        <label htmlFor="task-edit-sender">Sender name</label>
+                        <input
+                          id="task-edit-sender"
+                          value={friendTaskEditSuggestionForm.senderName}
+                          maxLength={80}
+                          placeholder="Optional"
+                          onChange={(event) =>
+                            setFriendTaskEditSuggestionForm((current) => ({
+                              ...current,
+                              senderName: event.target.value,
+                            }))
+                          }
+                        />
+                      </div>
+                    </div>
+
+                    <div className="field">
+                      <label htmlFor="task-edit-target">Exact task title to edit</label>
+                      <input
+                        id="task-edit-target"
+                        value={friendTaskEditSuggestionForm.taskTitle}
+                        maxLength={160}
+                        onChange={(event) =>
+                          setFriendTaskEditSuggestionForm((current) => ({
+                            ...current,
+                            taskTitle: event.target.value,
+                          }))
+                        }
+                      />
+                    </div>
+
+                    <div className="split-fields">
+                      <div className="field">
+                        <label htmlFor="task-edit-title">Suggested new title</label>
+                        <input
+                          id="task-edit-title"
+                          value={friendTaskEditSuggestionForm.suggestedTitle}
+                          maxLength={160}
+                          placeholder="Leave blank for no title change"
+                          onChange={(event) =>
+                            setFriendTaskEditSuggestionForm((current) => ({
+                              ...current,
+                              suggestedTitle: event.target.value,
+                            }))
+                          }
+                        />
+                      </div>
+                      <div className="field">
+                        <label htmlFor="task-edit-priority">Suggested priority</label>
+                        <select
+                          id="task-edit-priority"
+                          value={friendTaskEditSuggestionForm.suggestedPriority}
+                          onChange={(event) =>
+                            setFriendTaskEditSuggestionForm((current) => ({
+                              ...current,
+                              suggestedPriority: event.target.value as TaskPriority,
+                            }))
+                          }
+                        >
+                          {TASK_PRIORITY_OPTIONS.map((option) => (
+                            <option key={option.value} value={option.value}>
+                              {option.label}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+
+                    <div className="field">
+                      <label htmlFor="task-edit-notes">Suggested description</label>
+                      <textarea
+                        id="task-edit-notes"
+                        value={friendTaskEditSuggestionForm.suggestedNotes}
+                        placeholder="Leave blank for no description change"
+                        onChange={(event) =>
+                          setFriendTaskEditSuggestionForm((current) => ({
+                            ...current,
+                            suggestedNotes: event.target.value,
+                          }))
+                        }
+                      />
+                    </div>
+
+                    <div className="split-fields">
+                      <div className="field">
+                        <label htmlFor="task-edit-due-date">Suggested due date</label>
+                        <input
+                          id="task-edit-due-date"
+                          type="date"
+                          value={friendTaskEditSuggestionForm.suggestedDueDate}
+                          onChange={(event) =>
+                            setFriendTaskEditSuggestionForm((current) => ({
+                              ...current,
+                              suggestedDueDate: event.target.value,
+                            }))
+                          }
+                        />
+                      </div>
+                      <div className="field">
+                        <label htmlFor="task-edit-reminder-date">Suggested reminder date</label>
+                        <input
+                          id="task-edit-reminder-date"
+                          type="date"
+                          value={friendTaskEditSuggestionForm.suggestedReminderDate}
+                          onChange={(event) =>
+                            setFriendTaskEditSuggestionForm((current) => ({
+                              ...current,
+                              suggestedReminderDate: event.target.value,
+                            }))
+                          }
+                        />
+                      </div>
+                    </div>
+
+                    <button className="soft-button primary" type="submit">
+                      Send edit suggestion
+                    </button>
+                  </form>
+                </section>
+
+                <section className="details-panel">
+                  <div className="panel-top">
+                    <div>
+                      <p className="section-kicker">Later packaging</p>
+                      <h4>Startup mode belongs here when this becomes an exe</h4>
+                      <p className="field-hint">
+                        The toggle will be visible in this section once the app is packaged, but it
+                        is intentionally not active while running through VS Code.
+                      </p>
+                    </div>
+                    <span className="status-chip muted">exe step</span>
+                  </div>
+                  <button className="soft-button" type="button" disabled>
+                    Start app when I sign in
+                  </button>
+                </section>
+
+                {isDevVariant ? (
+                  <section className="details-panel">
+                  <div className="panel-top">
+                    <div>
+                      <p className="section-kicker">Recent popups</p>
+                      <h4>Password-protected local history</h4>
+                      <p className="field-hint">
+                        Recent app-to-app events stay out of the normal workflow. Unlock this only
+                        when you want to inspect what happened.
+                      </p>
+                    </div>
+                    <span className="status-chip muted">{recentFriendEvents.length} stored</span>
+                  </div>
+
+                  {!friendNetworkStatus?.hasRecentPopupPassword ? (
+                    <form className="composer-form" onSubmit={handleSetRecentPasswordSubmit}>
+                      <div className="field">
+                        <label htmlFor="new-recent-password">Create local password</label>
+                        <input
+                          id="new-recent-password"
+                          type="password"
+                          value={newRecentPopupPasswordDraft}
+                          onChange={(event) =>
+                            setNewRecentPopupPasswordDraft(event.target.value)
+                          }
+                        />
+                      </div>
+                      <button className="soft-button primary" type="submit">
+                        Protect recent popups
+                      </button>
+                    </form>
+                  ) : isRecentPopupsUnlocked ? (
+                    <div className="list-stack">
+                      <div className="row-actions">
+                        <button
+                          className="soft-button"
+                          type="button"
+                          onClick={() => setIsRecentPopupsUnlocked(false)}
+                        >
+                          Lock recent popups
+                        </button>
+                      </div>
+
+                      {recentFriendEvents.length === 0 ? (
+                        <p className="empty-state">No app-to-app popup events yet.</p>
+                      ) : (
+                        recentFriendEvents.slice(0, 20).map((popupEvent) => (
+                          <article key={popupEvent.id} className="history-row">
+                            <div>
+                              <div className="row-title">
+                                {popupEvent.title ?? popupEvent.relatedTaskTitle ?? popupEvent.kind}
+                              </div>
+                              <div className="row-meta">
+                                {formatDateTime(popupEvent.createdAt)} · {popupEvent.status}
+                                {popupEvent.senderName ? ` · ${popupEvent.senderName}` : ''}
+                              </div>
+                              <p className="row-note">{popupEvent.message}</p>
+                            </div>
+                            <span
+                              className={`status-chip ${
+                                popupEvent.priority === 'emergency' ? 'danger' : 'muted'
+                              }`}
+                            >
+                              {popupEvent.priority}
+                            </span>
+                          </article>
+                        ))
+                      )}
+                    </div>
+                  ) : (
+                    <form className="composer-form" onSubmit={handleRecentPasswordSubmit}>
+                      <div className="field">
+                        <label htmlFor="recent-password">Unlock recent popups</label>
+                        <input
+                          id="recent-password"
+                          type="password"
+                          value={recentPopupPasswordDraft}
+                          onChange={(event) =>
+                            setRecentPopupPasswordDraft(event.target.value)
+                          }
+                        />
+                      </div>
+                      <button className="soft-button primary" type="submit">
+                        Unlock
+                      </button>
+                    </form>
+                  )}
+                  </section>
+                ) : null}
+              </div>
+            </section>
+          ) : null}
         </section>
       </div>
       {selectedHistoryDate ? (
@@ -3056,6 +5568,9 @@ function MiniWindowScreen() {
 
   useEffect(() => {
     document.title = 'Mini Window';
+    void window.todoApp.app.info().then((info) => {
+      document.body.dataset.appVariant = info.variant;
+    });
 
     let isActive = true;
 
@@ -3725,20 +6240,25 @@ function ReminderPopupScreen() {
   const payload = getReminderPopupPayload();
   const [resolvedSubject, setResolvedSubject] = useState<string>(() => payload?.title ?? '');
   const [resolvedSender, setResolvedSender] = useState<string>(() => payload?.contextValue ?? '');
+  const presentation = payload?.presentation ?? 'standard';
   const reminderType =
     payload?.contextLabel ?? (payload?.selection ? 'Task Reminder' : 'General Reminder');
   const messageContent =
     payload?.body ?? 'The reminder popup opened, but the message did not load correctly.';
+  const queuedCount = payload?.queuedCount ?? 0;
 
   useEffect(() => {
-    document.title = 'Reminder';
-  }, []);
+    document.title = presentation === 'mega' ? 'Emergency Popup' : 'Reminder';
+    void window.todoApp.app.info().then((info) => {
+      document.body.dataset.appVariant = info.variant;
+    });
+  }, [presentation]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         event.preventDefault();
-        void window.todoApp.app.closeCurrentWindow();
+        void window.todoApp.app.closeCurrentWindow('dismiss');
       }
     };
 
@@ -3753,7 +6273,11 @@ function ReminderPopupScreen() {
     setResolvedSubject(payload?.title ?? '');
     setResolvedSender(payload?.contextValue ?? '');
 
-    if (!payload?.selection || payload.title.trim()) {
+    if (
+      !payload?.selection ||
+      payload.title.trim() ||
+      payload.selection.kind === 'view'
+    ) {
       return;
     }
 
@@ -3793,8 +6317,16 @@ function ReminderPopupScreen() {
     };
   }, [payload]);
 
+  const openButtonLabel = payload?.selection
+    ? payload.selection.kind === 'routine'
+      ? 'Open routine'
+      : payload.selection.kind === 'view'
+      ? 'Open queue'
+      : 'Open task'
+    : 'Open app';
+
   const handleDismiss = async () => {
-    await window.todoApp.app.closeCurrentWindow();
+    await window.todoApp.app.closeCurrentWindow('dismiss');
   };
 
   const handleOpen = async () => {
@@ -3804,14 +6336,49 @@ function ReminderPopupScreen() {
       await window.todoApp.app.show();
     }
 
-    await window.todoApp.app.closeCurrentWindow();
+    await window.todoApp.app.closeCurrentWindow('open');
   };
+
+  if (presentation === 'mega') {
+    return (
+      <main className="reminder-popup-shell mega">
+        <section className="reminder-popup mega">
+          <div className="reminder-popup-copy mega">
+            <p className="section-kicker">{reminderType}</p>
+            <h1 className={`reminder-popup-subject mega${resolvedSubject ? '' : ' is-empty'}`}>
+              {resolvedSubject || 'Emergency Popup'}
+            </h1>
+            <p className="reminder-popup-field-label">Sender:</p>
+            <p className={`reminder-popup-field-value mega${resolvedSender ? '' : ' is-empty'}`}>
+              {resolvedSender || '\u00A0'}
+            </p>
+            <p className="reminder-popup-field-label">Message:</p>
+            <p className="reminder-popup-body mega">{messageContent}</p>
+          </div>
+
+          <div className="reminder-popup-actions mega">
+            <button className="soft-button primary" type="button" onClick={() => void handleOpen()}>
+              {openButtonLabel}
+            </button>
+            <button className="soft-button" type="button" onClick={() => void handleDismiss()}>
+              Acknowledge
+            </button>
+          </div>
+        </section>
+      </main>
+    );
+  }
 
   return (
     <main className="reminder-popup-shell">
       <section className="reminder-popup">
         <div className="reminder-popup-copy">
-          <p className="section-kicker">{reminderType}</p>
+          <div className="reminder-popup-topline">
+            <p className="section-kicker">{reminderType}</p>
+            {queuedCount > 0 ? (
+              <span className="reminder-popup-queued">{queuedCount} queued</span>
+            ) : null}
+          </div>
           <h1 className={`reminder-popup-subject${resolvedSubject ? '' : ' is-empty'}`}>
             {resolvedSubject || '\u00A0'}
           </h1>
@@ -3825,11 +6392,7 @@ function ReminderPopupScreen() {
 
         <div className="reminder-popup-actions">
           <button className="soft-button primary" type="button" onClick={() => void handleOpen()}>
-            {payload?.selection
-              ? payload.selection.kind === 'routine'
-                ? 'Open routine'
-                : 'Open task'
-              : 'Open app'}
+            {openButtonLabel}
           </button>
           <button className="soft-button" type="button" onClick={() => void handleDismiss()}>
             Dismiss
@@ -3842,6 +6405,26 @@ function ReminderPopupScreen() {
 
 export default function App() {
   const hashRoute = getHashRoute();
+  const [themeSettings, setThemeSettings] = useState<AppThemeSettings>(loadThemeSettings);
+
+  useEffect(() => {
+    applyThemeSettings(themeSettings);
+    saveThemeSettings(themeSettings);
+  }, [themeSettings]);
+
+  useEffect(() => {
+    const refreshTheme = () => {
+      setThemeSettings(loadThemeSettings());
+    };
+
+    window.addEventListener('focus', refreshTheme);
+    window.addEventListener('storage', refreshTheme);
+
+    return () => {
+      window.removeEventListener('focus', refreshTheme);
+      window.removeEventListener('storage', refreshTheme);
+    };
+  }, []);
 
   return (
     <AppErrorBoundary>
@@ -3850,7 +6433,7 @@ export default function App() {
       ) : hashRoute === 'reminder-popup' ? (
         <ReminderPopupScreen />
       ) : (
-        <MainScreen />
+        <MainScreen themeSettings={themeSettings} onThemeChange={setThemeSettings} />
       )}
     </AppErrorBoundary>
   );

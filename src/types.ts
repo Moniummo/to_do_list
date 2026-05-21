@@ -30,6 +30,40 @@ export interface TaskUpdate {
   priority?: TaskPriority | null;
 }
 
+export type TimeBlockStatus = 'planned' | 'completed' | 'missed';
+
+export interface TimeBlock {
+  id: string;
+  title: string;
+  startAt: string;
+  endAt: string;
+  createdAt: string;
+  status: TimeBlockStatus;
+  taskId?: string;
+  notes?: string;
+  enableDnd?: boolean;
+}
+
+export interface TimeBlockDraft {
+  title: string;
+  startAt: string;
+  endAt: string;
+  taskId?: string;
+  notes?: string;
+  enableDnd?: boolean;
+}
+
+export interface TimeBlockUpdate {
+  id: string;
+  title?: string;
+  startAt?: string;
+  endAt?: string;
+  taskId?: string | null;
+  notes?: string | null;
+  enableDnd?: boolean;
+  status?: TimeBlockStatus;
+}
+
 export type RoutineUnit = 'day' | 'week' | 'month';
 export type RoutineWeekday = 'sun' | 'mon' | 'tue' | 'wed' | 'thu' | 'fri' | 'sat';
 
@@ -105,10 +139,180 @@ export interface RoutineHistoryEntry {
   occurrence: RoutineOccurrence;
 }
 
+export interface PlannerState {
+  schemaVersion: number;
+  oneOffTasks: Task[];
+  timeBlocks: TimeBlock[];
+  routineTemplates: RoutineTemplate[];
+  routineOccurrences: RoutineOccurrence[];
+  notifiedReminders: Record<string, string>;
+}
+
 export interface HistoryDayPayload {
   date: string;
   tasks: Task[];
   routineEntries: RoutineHistoryEntry[];
+}
+
+export type WebsiteTaskSubmissionStatus = 'pending' | 'accepted' | 'dismissed';
+
+export interface WebsiteTaskSubmission {
+  id: string;
+  senderName?: string;
+  title: string;
+  details?: string;
+  createdAt: string;
+  status: WebsiteTaskSubmissionStatus;
+  reviewedAt?: string;
+  acceptedLocalTaskId?: string;
+  source?: string;
+}
+
+export type WebsiteTaskEditSuggestionStatus = 'pending' | 'accepted' | 'dismissed';
+
+export interface WebsiteTaskEditSuggestion {
+  id: string;
+  senderName?: string;
+  sharedTaskId: string;
+  localTaskId: string;
+  taskTitleSnapshot: string;
+  changeTitle: boolean;
+  suggestedTitle?: string;
+  changeNotes: boolean;
+  suggestedNotes?: string;
+  changeDueAt: boolean;
+  suggestedDueAt?: string;
+  changeReminderAt: boolean;
+  suggestedReminderAt?: string;
+  changePriority: boolean;
+  suggestedPriority?: TaskPriority;
+  createdAt: string;
+  status: WebsiteTaskEditSuggestionStatus;
+  reviewedAt?: string;
+  source?: string;
+}
+
+export type AppDndMode = 'off' | 'quiet' | 'full';
+
+export type AppPopupEventKind =
+  | 'general_popup'
+  | 'task_popup'
+  | 'emergency_popup'
+  | 'task_submission'
+  | 'task_edit_suggestion';
+
+export type AppPopupEventPriority = 'normal' | 'emergency';
+
+export type AppPopupEventStatus =
+  | 'pending'
+  | 'delivered'
+  | 'dismissed'
+  | 'opened'
+  | 'accepted'
+  | 'denied';
+
+export type PopupCloseReason = 'dismiss' | 'open';
+
+export interface AppDevice {
+  deviceKey: string;
+  deviceName?: string;
+  currentFriendCode?: string;
+  createdAt: string;
+  updatedAt: string;
+  lastSeenAt?: string;
+}
+
+export interface FriendCodeAlias {
+  id: string;
+  code: string;
+  normalizedCode: string;
+  deviceKey: string;
+  createdAt: string;
+  retiredAt?: string;
+}
+
+export interface AppPopupEvent {
+  id: string;
+  recipientDeviceKey: string;
+  senderDeviceKey?: string;
+  senderName?: string;
+  senderFriendCode?: string;
+  source: string;
+  kind: AppPopupEventKind;
+  priority: AppPopupEventPriority;
+  title?: string;
+  message: string;
+  relatedTaskId?: string;
+  relatedTaskTitle?: string;
+  payload: Record<string, unknown>;
+  status: AppPopupEventStatus;
+  createdAt: string;
+  deliveredAt?: string;
+  reviewedAt?: string;
+}
+
+export interface AppPopupDraft {
+  recipientFriendCode: string;
+  senderName?: string;
+  kind: AppPopupEventKind;
+  priority: AppPopupEventPriority;
+  title?: string;
+  message: string;
+  relatedTaskId?: string;
+  relatedTaskTitle?: string;
+  emergencyPassword?: string;
+  payload?: Record<string, unknown>;
+}
+
+export type AppVariant = 'dev' | 'user';
+
+export interface AppInfo {
+  variant: AppVariant;
+  isDevVariant: boolean;
+}
+
+export interface AccountCredentials {
+  username: string;
+  password: string;
+}
+
+export interface AccountSession {
+  accountId: string;
+  username: string;
+}
+
+export interface AccountStatus {
+  isConfigured: boolean;
+  missingEnvKeys: string[];
+  session?: AccountSession;
+  lastSyncedAt?: string;
+  syncError?: string;
+}
+
+export interface SavedFriendContact {
+  id: string;
+  accountId: string;
+  nickname: string;
+  friendCode: string;
+  normalizedFriendCode: string;
+  createdAt: string;
+  updatedAt: string;
+  lastResolvedAt?: string;
+}
+
+export interface SavedFriendContactDraft {
+  nickname: string;
+  friendCode: string;
+}
+
+export interface FriendNetworkStatus {
+  isConfigured: boolean;
+  missingEnvKeys: string[];
+  deviceKey: string;
+  deviceName?: string;
+  dndMode: AppDndMode;
+  profileName?: string;
+  hasRecentPopupPassword: boolean;
 }
 
 export interface TaskCompletionDateUpdate {
@@ -129,9 +333,21 @@ export type AppSelection =
   | {
       kind: 'routine';
       id: string;
+    }
+  | {
+      kind: 'view';
+      id: 'submissions' | 'network';
     };
 
 export interface TodoAppApi {
+  account: {
+    status: () => Promise<AccountStatus>;
+    signUp: (credentials: AccountCredentials) => Promise<AccountStatus>;
+    signIn: (credentials: AccountCredentials) => Promise<AccountStatus>;
+    signOut: () => Promise<AccountStatus>;
+    syncNow: () => Promise<AccountStatus>;
+    onChanged: (listener: () => void) => () => void;
+  };
   tasks: {
     list: () => Promise<Task[]>;
     create: (input: TaskDraft) => Promise<Task>;
@@ -141,6 +357,13 @@ export interface TodoAppApi {
     delete: (id: string) => Promise<Task[]>;
     setCompletionDate: (input: TaskCompletionDateUpdate) => Promise<Task[]>;
     snooze: (id: string, minutes: number) => Promise<Task[]>;
+    onChanged: (listener: () => void) => () => void;
+  };
+  timeBlocks: {
+    list: () => Promise<TimeBlock[]>;
+    create: (input: TimeBlockDraft) => Promise<TimeBlock[]>;
+    update: (input: TimeBlockUpdate) => Promise<TimeBlock[]>;
+    delete: (id: string) => Promise<TimeBlock[]>;
     onChanged: (listener: () => void) => () => void;
   };
   routines: {
@@ -161,11 +384,40 @@ export interface TodoAppApi {
   history: {
     day: (date: string) => Promise<HistoryDayPayload>;
   };
+  submissions: {
+    list: () => Promise<WebsiteTaskSubmission[]>;
+    accept: (id: string) => Promise<WebsiteTaskSubmission[]>;
+    dismiss: (id: string) => Promise<WebsiteTaskSubmission[]>;
+    onChanged: (listener: () => void) => () => void;
+  };
+  editSuggestions: {
+    list: () => Promise<WebsiteTaskEditSuggestion[]>;
+    accept: (id: string) => Promise<WebsiteTaskEditSuggestion[]>;
+    dismiss: (id: string) => Promise<WebsiteTaskEditSuggestion[]>;
+    onChanged: (listener: () => void) => () => void;
+  };
+  friendNetwork: {
+    status: () => Promise<FriendNetworkStatus>;
+    setDndMode: (mode: AppDndMode) => Promise<FriendNetworkStatus>;
+    listFriendCodes: () => Promise<FriendCodeAlias[]>;
+    setFriendCode: (code: string) => Promise<FriendCodeAlias>;
+    listContacts: () => Promise<SavedFriendContact[]>;
+    saveContact: (input: SavedFriendContactDraft) => Promise<SavedFriendContact[]>;
+    deleteContact: (id: string) => Promise<SavedFriendContact[]>;
+    listPendingEvents: () => Promise<AppPopupEvent[]>;
+    listRecentEvents: () => Promise<AppPopupEvent[]>;
+    sendPopup: (input: AppPopupDraft) => Promise<void>;
+    acceptEvent: (id: string) => Promise<AppPopupEvent[]>;
+    denyEvent: (id: string) => Promise<AppPopupEvent[]>;
+    setRecentPopupPassword: (password: string) => Promise<FriendNetworkStatus>;
+    verifyRecentPopupPassword: (password: string) => Promise<boolean>;
+    onChanged: (listener: () => void) => () => void;
+  };
   app: {
+    info: () => Promise<AppInfo>;
     show: () => Promise<void>;
     showSelection: (selection: AppSelection) => Promise<void>;
-    previewReminderPopup: () => Promise<void>;
-    closeCurrentWindow: () => Promise<void>;
+    closeCurrentWindow: (reason?: PopupCloseReason) => Promise<void>;
     onSelection: (listener: (selection: AppSelection) => void) => () => void;
   };
   quickAdd: {

@@ -7,8 +7,14 @@
   "private": true,
   "scripts": {
     "start": "electron-forge start",
+    "start:dev": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"Remove-Item Env:TODO_PROFILE -ErrorAction SilentlyContinue; $env:TODO_APP_VARIANT='dev'; $env:TODO_WEBPACK_PORT='3000'; $env:TODO_WEBPACK_LOGGER_PORT='9000'; npm run start\"",
+    "start:user": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"$env:TODO_PROFILE='user'; $env:TODO_APP_VARIANT='user'; $env:TODO_WEBPACK_PORT='3001'; $env:TODO_WEBPACK_LOGGER_PORT='9001'; npm run start\"",
+    "start:me": "npm run start:dev",
+    "start:friend": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"$env:TODO_PROFILE='friend'; $env:TODO_APP_VARIANT='user'; $env:TODO_WEBPACK_PORT='3002'; $env:TODO_WEBPACK_LOGGER_PORT='9002'; npm run start\"",
     "package": "electron-forge package",
     "make": "electron-forge make",
+    "make:dev": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"$env:TODO_APP_VARIANT='dev'; npm run make\"",
+    "make:user": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"$env:TODO_APP_VARIANT='user'; npm run make\"",
     "publish": "electron-forge publish",
     "lint": "eslint --ext .ts,.tsx ."
   },

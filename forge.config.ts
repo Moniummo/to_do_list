@@ -11,9 +11,20 @@ import { FuseV1Options, FuseVersion } from '@electron/fuses';
 import { mainConfig } from './webpack.main.config';
 import { rendererConfig } from './webpack.renderer.config';
 
+const parseDevPort = (value: string | undefined, fallback: number): number => {
+  const parsedValue = Number.parseInt(value ?? '', 10);
+  return Number.isInteger(parsedValue) && parsedValue > 0 ? parsedValue : fallback;
+};
+
+const appVariant = process.env.TODO_APP_VARIANT?.trim().toLowerCase() === 'user'
+  ? 'user'
+  : 'dev';
+
 const config: ForgeConfig = {
   packagerConfig: {
     asar: true,
+    name: appVariant === 'user' ? 'To Do List' : 'To Do List Dev',
+    executableName: appVariant === 'user' ? 'To Do List' : 'To Do List Dev',
   },
   rebuildConfig: {},
   makers: [
@@ -26,6 +37,8 @@ const config: ForgeConfig = {
     new AutoUnpackNativesPlugin({}),
     new WebpackPlugin({
       mainConfig,
+      port: parseDevPort(process.env.TODO_WEBPACK_PORT, 3000),
+      loggerPort: parseDevPort(process.env.TODO_WEBPACK_LOGGER_PORT, 9000),
       renderer: {
         config: rendererConfig,
         entryPoints: [

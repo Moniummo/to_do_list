@@ -12,6 +12,11 @@ declare module '@supabase/supabase-js' {
     error: unknown | null;
   }>;
 
+  type RpcResponse = Promise<{
+    data: unknown | null;
+    error: unknown | null;
+  }>;
+
   type UpdateBuilder = {
     eq: (
       column: string,
@@ -72,6 +77,7 @@ declare module '@supabase/supabase-js' {
       ) => ChannelBuilder;
     };
     removeChannel: (channel: RealtimeChannel) => Promise<unknown>;
+    rpc: (functionName: string, args?: Record<string, unknown>) => RpcResponse;
   };
 
   export function createClient(...args: unknown[]): SupabaseClientLike;

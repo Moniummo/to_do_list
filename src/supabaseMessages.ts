@@ -18,7 +18,7 @@ export type SupabaseMessageRow = {
 };
 
 type SupabaseMessageServiceOptions = {
-  onMessage: (message: SupabaseMessageRow) => void;
+  onMessage: (message: SupabaseMessageRow) => boolean | void;
   onError: (message: string, error?: unknown) => void;
 };
 
@@ -86,8 +86,13 @@ export const createSupabaseMessageService = ({
       return;
     }
 
+    const wasHandled = onMessage(message) !== false;
+
+    if (!wasHandled) {
+      return;
+    }
+
     handledMessageIds.add(message.id);
-    onMessage(message);
     await markMessageAsRead(message.id);
   };
 
