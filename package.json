@@ -5,6 +5,7 @@
   "description": "Desktop to-do list with quick add and reminder notifications.",
   "main": ".webpack/main",
   "private": true,
+  "repository": "https://github.com/Moniummo/to_do_list",
   "scripts": {
     "start": "electron-forge start",
     "start:dev": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"Remove-Item Env:TODO_PROFILE -ErrorAction SilentlyContinue; $env:TODO_APP_VARIANT='dev'; $env:TODO_WEBPACK_PORT='3000'; $env:TODO_WEBPACK_LOGGER_PORT='9000'; npm run start\"",
@@ -16,6 +17,7 @@
     "make:dev": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"$env:TODO_APP_VARIANT='dev'; npm run make\"",
     "make:user": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"$env:TODO_APP_VARIANT='user'; npm run make\"",
     "publish": "electron-forge publish",
+    "publish:user": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"$env:TODO_APP_VARIANT='user'; npm run publish\"",
     "lint": "eslint --ext .ts,.tsx ."
   },
   "keywords": [],
@@ -33,6 +35,7 @@
     "@electron-forge/plugin-auto-unpack-natives": "^7.11.1",
     "@electron-forge/plugin-fuses": "^7.11.1",
     "@electron-forge/plugin-webpack": "^7.11.1",
+    "@electron-forge/publisher-github": "^7.11.2",
     "@electron/fuses": "^1.8.0",
     "@types/node": "^16.11.7",
     "@types/react": "^19.2.14",
@@ -56,6 +59,7 @@
     "electron-squirrel-startup": "^1.0.1",
     "electron-store": "^11.0.2",
     "react": "^19.2.5",
-    "react-dom": "^19.2.5"
+    "react-dom": "^19.2.5",
+    "update-electron-app": "^3.2.0"
   }
 }

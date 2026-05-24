@@ -23,11 +23,13 @@ import type {
   AppInfo,
   AppDndMode,
   AppPopupEvent,
+  EmergencyPasswordGrant,
   AppSelection,
-  FriendCodeAlias,
+  FriendTaskPermission,
   FriendNetworkStatus,
   HistoryDayPayload,
   OccurrenceStatus,
+  PublicSharedTask,
   RoutineDraft,
   RoutineHistoryPayload,
   RoutineHistorySummary,
@@ -42,6 +44,7 @@ import type {
   TaskCompletionDateUpdate,
   TaskDraft,
   TaskPriority,
+  TaskVisibility,
   TaskUpdate,
   TimeBlock,
   TimeBlockDraft,
@@ -57,6 +60,7 @@ type OneOffFormValues = {
   reminderTime: string;
   notes: string;
   priority: TaskPriority;
+  visibility: TaskVisibility;
 };
 
 type RoutineFormValues = {
@@ -120,6 +124,8 @@ type MainView =
   | 'submissions'
   | 'network';
 
+type FriendNetworkPanel = 'friends' | 'send' | 'review' | 'settings';
+
 type TimeBlockFormValues = {
   title: string;
   taskId: string;
@@ -131,7 +137,8 @@ type TimeBlockFormValues = {
 };
 
 type FriendPopupFormValues = {
-  recipientFriendCode: string;
+  recipientUsername: string;
+  recipientAccountId: string;
   senderName: string;
   message: string;
   isEmergency: boolean;
@@ -139,13 +146,16 @@ type FriendPopupFormValues = {
 };
 
 type FriendTaskSuggestionFormValues = {
-  recipientFriendCode: string;
+  recipientUsername: string;
+  recipientAccountId: string;
   senderName: string;
 } & OneOffFormValues;
 
 type FriendTaskEditSuggestionFormValues = {
-  recipientFriendCode: string;
+  recipientUsername: string;
+  recipientAccountId: string;
   senderName: string;
+  publicTaskId: string;
   taskTitle: string;
   suggestedTitle: string;
   suggestedNotes: string;
@@ -163,7 +173,13 @@ type AccountFormValues = {
 
 type FriendContactFormValues = {
   nickname: string;
-  friendCode: string;
+  friendUsername: string;
+  taskPermission: FriendTaskPermission;
+};
+
+type EmergencyPasswordFormValues = {
+  friendAccountId: string;
+  password: string;
 };
 
 type WeeklyPlanItem = {
@@ -513,8 +529,168 @@ const TASK_PRIORITY_OPTIONS: Array<{
   },
 ];
 
+const TASK_VISIBILITY_OPTIONS: Array<{
+  label: string;
+  value: TaskVisibility;
+  description: string;
+}> = [
+  {
+    label: 'Public to permitted friends',
+    value: 'public',
+    description: 'Friends with Public or All access can see this task.',
+  },
+  {
+    label: 'Private',
+    value: 'private',
+    description: 'Only friends with All access can see this task.',
+  },
+];
+
+const FRIEND_TASK_PERMISSION_OPTIONS: Array<{
+  label: string;
+  value: FriendTaskPermission;
+  description: string;
+}> = [
+  {
+    label: 'No tasks',
+    value: 'none',
+    description: 'This friend cannot see your task list.',
+  },
+  {
+    label: 'Public tasks',
+    value: 'public',
+    description: 'This friend can see tasks not marked private.',
+  },
+  {
+    label: 'All tasks',
+    value: 'all',
+    description: 'This friend can see public and private tasks.',
+  },
+];
+
 const getErrorMessage = (error: unknown): string =>
   error instanceof Error ? error.message : 'Something went wrong. Please try again.';
+
+const getFriendContactLabel = (contact: SavedFriendContact): string =>
+  contact.friendDisplayName
+    ? `${contact.nickname} (${contact.friendDisplayName})`
+    : contact.nickname;
+
+const getFriendContactMeta = (contact: SavedFriendContact): string =>
+  `@${contact.friendUsername}`;
+
+const getRecordString = (
+  record: Record<string, unknown> | undefined,
+  key: string,
+): string | undefined => {
+  const value = record?.[key];
+  return typeof value === 'string' && value.trim() ? value : undefined;
+};
+
+const formatPriorityLabel = (value?: TaskPriority) =>
+  value ? `${value.slice(0, 1).toUpperCase()}${value.slice(1)}` : 'Auto';
+
+const formatSuggestedDateTime = (value?: string): string | undefined =>
+  value ? formatDateTime(value) ?? value : undefined;
+
+const getFriendTaskEditChangeRows = (event: AppPopupEvent): string[] => {
+  const payload = event.payload;
+  const rows = [
+    getRecordString(payload, 'suggestedTitle')
+      ? `Title: ${getRecordString(payload, 'suggestedTitle')}`
+      : null,
+    getRecordString(payload, 'suggestedNotes')
+      ? `Description: ${getRecordString(payload, 'suggestedNotes')}`
+      : null,
+    getRecordString(payload, 'suggestedDueAt')
+      ? `Due date: ${formatSuggestedDateTime(getRecordString(payload, 'suggestedDueAt'))}`
+      : null,
+    getRecordString(payload, 'suggestedReminderAt')
+      ? `Reminder: ${formatSuggestedDateTime(getRecordString(payload, 'suggestedReminderAt'))}`
+      : null,
+    getRecordString(payload, 'suggestedPriority')
+      ? `Priority: ${formatPriorityLabel(getRecordString(payload, 'suggestedPriority') as TaskPriority)}`
+      : null,
+  ].filter((value): value is string => Boolean(value));
+
+  return rows.length ? rows : [event.message];
+};
+
+type FieldErrorProps = {
+  message?: string;
+};
+
+function FieldError({ message }: FieldErrorProps) {
+  return message ? <p className="field-error">{message}</p> : null;
+}
+
+type FriendRecipientPickerProps = {
+  id: string;
+  label: string;
+  contacts: SavedFriendContact[];
+  value: string;
+  selectedAccountId: string;
+  error?: string;
+  onSelect: (contact: SavedFriendContact) => void;
+  onClear: (value: string) => void;
+};
+
+function FriendRecipientPicker({
+  id,
+  label,
+  contacts,
+  value,
+  selectedAccountId,
+  error,
+  onSelect,
+  onClear,
+}: FriendRecipientPickerProps) {
+  const query = value.trim().toLowerCase();
+  const filteredContacts = contacts
+    .filter((contact) => {
+      if (!query) {
+        return true;
+      }
+
+      return [contact.nickname, contact.friendUsername, contact.friendDisplayName ?? '']
+        .some((candidate) => candidate.toLowerCase().includes(query));
+    })
+    .slice(0, 6);
+
+  return (
+    <div className="field friend-search-field">
+      <label htmlFor={id}>{label}</label>
+      <input
+        id={id}
+        value={value}
+        maxLength={64}
+        placeholder="Search saved friends"
+        onChange={(event) => onClear(event.target.value.replace(/^@/, ''))}
+        autoComplete="off"
+      />
+      <div className="friend-search-menu">
+        {filteredContacts.length ? (
+          filteredContacts.map((contact) => (
+            <button
+              key={contact.id}
+              className={`friend-search-option${
+                selectedAccountId === contact.friendAccountId ? ' is-selected' : ''
+              }`}
+              type="button"
+              onClick={() => onSelect(contact)}
+            >
+              <span>{getFriendContactLabel(contact)}</span>
+              <small>{getFriendContactMeta(contact)}</small>
+            </button>
+          ))
+        ) : (
+          <p className="friend-search-empty">No saved friends match that search.</p>
+        )}
+      </div>
+      <FieldError message={error} />
+    </div>
+  );
+}
 
 const createEmptyTaskForm = (): OneOffFormValues => ({
   title: '',
@@ -524,6 +700,7 @@ const createEmptyTaskForm = (): OneOffFormValues => ({
   reminderTime: '',
   notes: '',
   priority: 'auto',
+  visibility: 'public',
 });
 
 const createEmptyRoutineForm = (): RoutineFormValues => ({
@@ -561,15 +738,18 @@ const createEmptyTimeBlockForm = (date = toLocalDateString(new Date())): TimeBlo
 });
 
 const createEmptyFriendTaskSuggestionForm = (): FriendTaskSuggestionFormValues => ({
-  recipientFriendCode: '',
+  recipientUsername: '',
+  recipientAccountId: '',
   senderName: '',
   ...createEmptyTaskForm(),
 });
 
 const createEmptyFriendTaskEditSuggestionForm =
   (): FriendTaskEditSuggestionFormValues => ({
-    recipientFriendCode: '',
+    recipientUsername: '',
+    recipientAccountId: '',
     senderName: '',
+    publicTaskId: '',
     taskTitle: '',
     suggestedTitle: '',
     suggestedNotes: '',
@@ -676,6 +856,7 @@ const createTaskFormValues = (task?: Task): OneOffFormValues => {
     reminderTime: reminderValues.time,
     notes: task?.notes ?? '',
     priority: normalizeTaskPriority(task?.priority),
+    visibility: task?.visibility === 'private' ? 'private' : 'public',
   };
 };
 
@@ -721,6 +902,7 @@ const buildTaskDraft = (values: OneOffFormValues): TaskDraft => {
     reminderAt: reminderLocalValue ? toIsoValue(reminderLocalValue) : undefined,
     notes: values.notes,
     priority: values.priority,
+    visibility: values.visibility,
   };
 };
 
@@ -746,6 +928,7 @@ const buildTaskUpdate = (taskId: string, values: OneOffFormValues): TaskUpdate =
     reminderAt: reminderLocalValue ? toIsoValue(reminderLocalValue) ?? null : null,
     notes: values.notes.trim() ? values.notes : null,
     priority: values.priority,
+    visibility: values.visibility,
   };
 };
 
@@ -1353,6 +1536,9 @@ function TaskRow({
             <span className={`status-chip ${priorityDetails.tone}`}>
               {priorityDetails.label}
             </span>
+            <span className={`status-chip ${task.visibility === 'private' ? 'muted' : 'success'}`}>
+              {task.visibility === 'private' ? 'private' : 'public'}
+            </span>
           </div>
 
           {task.notes ? <p className="row-note">{task.notes}</p> : null}
@@ -1429,6 +1615,34 @@ function TaskRow({
               {
                 TASK_PRIORITY_OPTIONS.find((option) => option.value === formValues.priority)
                   ?.description
+              }
+            </div>
+          </div>
+
+          <div className="field">
+            <label htmlFor={`task-visibility-${task.id}`}>Friend visibility</label>
+            <select
+              id={`task-visibility-${task.id}`}
+              value={formValues.visibility}
+              onChange={(event) => {
+                const { value } = event.currentTarget;
+                setFormValues((current) => ({
+                  ...current,
+                  visibility: value as TaskVisibility,
+                }));
+              }}
+            >
+              {TASK_VISIBILITY_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+            <div className="field-hint">
+              {
+                TASK_VISIBILITY_OPTIONS.find(
+                  (option) => option.value === formValues.visibility,
+                )?.description
               }
             </div>
           </div>
@@ -2145,8 +2359,11 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
   const [editSuggestions, setEditSuggestions] = useState<WebsiteTaskEditSuggestion[]>([]);
   const [friendNetworkStatus, setFriendNetworkStatus] =
     useState<FriendNetworkStatus | null>(null);
-  const [friendCodes, setFriendCodes] = useState<FriendCodeAlias[]>([]);
   const [friendContacts, setFriendContacts] = useState<SavedFriendContact[]>([]);
+  const [emergencyPasswords, setEmergencyPasswords] = useState<EmergencyPasswordGrant[]>([]);
+  const [emergencyPasswordsForMe, setEmergencyPasswordsForMe] = useState<
+    EmergencyPasswordGrant[]
+  >([]);
   const [pendingFriendEvents, setPendingFriendEvents] = useState<AppPopupEvent[]>([]);
   const [recentFriendEvents, setRecentFriendEvents] = useState<AppPopupEvent[]>([]);
   const [historyPayload, setHistoryPayload] = useState<RoutineHistoryPayload | null>(null);
@@ -2159,17 +2376,24 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
   const [routineFormValues, setRoutineFormValues] = useState<RoutineFormValues>(
     createEmptyRoutineForm(),
   );
-  const [friendCodeDraft, setFriendCodeDraft] = useState('');
+  const [displayNameDraft, setDisplayNameDraft] = useState('');
   const [accountForm, setAccountForm] = useState<AccountFormValues>({
     username: '',
     password: '',
   });
   const [friendContactForm, setFriendContactForm] = useState<FriendContactFormValues>({
     nickname: '',
-    friendCode: '',
+    friendUsername: '',
+    taskPermission: 'none',
   });
+  const [emergencyPasswordForm, setEmergencyPasswordForm] =
+    useState<EmergencyPasswordFormValues>({
+      friendAccountId: '',
+      password: '',
+    });
   const [friendPopupForm, setFriendPopupForm] = useState<FriendPopupFormValues>({
-    recipientFriendCode: '',
+    recipientUsername: '',
+    recipientAccountId: '',
     senderName: '',
     message: '',
     isEmergency: false,
@@ -2185,6 +2409,8 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
   const [newRecentPopupPasswordDraft, setNewRecentPopupPasswordDraft] = useState('');
   const [isRecentPopupsUnlocked, setIsRecentPopupsUnlocked] = useState(false);
   const [activeView, setActiveView] = useState<MainView>('today');
+  const [activeNetworkPanel, setActiveNetworkPanel] =
+    useState<FriendNetworkPanel>('friends');
   const [editingRoutineId, setEditingRoutineId] = useState<string | null>(null);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [selectedRoutineId, setSelectedRoutineId] = useState<string | null>(null);
@@ -2200,6 +2426,12 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
   const [isHistoryDayLoading, setIsHistoryDayLoading] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [friendFormErrors, setFriendFormErrors] = useState<Record<string, string>>({});
+  const [friendPublicTasks, setFriendPublicTasks] = useState<PublicSharedTask[]>([]);
+  const [isLoadingFriendPublicTasks, setIsLoadingFriendPublicTasks] = useState(false);
+  const [visibleEmergencyPasswordIds, setVisibleEmergencyPasswordIds] = useState<
+    Record<string, boolean>
+  >({});
   const [historyDayError, setHistoryDayError] = useState<string | null>(null);
 
   const historyRoutineIdRef = useRef<string | null>(null);
@@ -2219,8 +2451,9 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
       nextSubmissions,
       nextEditSuggestions,
       nextFriendNetworkStatus,
-      nextFriendCodes,
       nextFriendContacts,
+      nextEmergencyPasswords,
+      nextEmergencyPasswordsForMe,
       nextPendingFriendEvents,
       nextRecentFriendEvents,
     ] = await Promise.all([
@@ -2230,8 +2463,9 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
       nextAppInfo.isDevVariant ? window.todoApp.submissions.list() : Promise.resolve([]),
       nextAppInfo.isDevVariant ? window.todoApp.editSuggestions.list() : Promise.resolve([]),
       window.todoApp.friendNetwork.status(),
-      window.todoApp.friendNetwork.listFriendCodes(),
       window.todoApp.friendNetwork.listContacts(),
+      window.todoApp.friendNetwork.listEmergencyPasswords(),
+      window.todoApp.friendNetwork.listEmergencyPasswordsForMe(),
       window.todoApp.friendNetwork.listPendingEvents(),
       nextAppInfo.isDevVariant
         ? window.todoApp.friendNetwork.listRecentEvents()
@@ -2246,8 +2480,9 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
     setSubmissions(nextSubmissions);
     setEditSuggestions(nextEditSuggestions);
     setFriendNetworkStatus(nextFriendNetworkStatus);
-    setFriendCodes(nextFriendCodes);
     setFriendContacts(nextFriendContacts);
+    setEmergencyPasswords(nextEmergencyPasswords);
+    setEmergencyPasswordsForMe(nextEmergencyPasswordsForMe);
     setPendingFriendEvents(nextPendingFriendEvents);
     setRecentFriendEvents(nextRecentFriendEvents);
 
@@ -2594,6 +2829,57 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
     0,
   );
 
+  const clearFriendFormErrors = (...keys: string[]) => {
+    setFriendFormErrors((current) => {
+      const nextErrors = { ...current };
+      keys.forEach((key) => {
+        delete nextErrors[key];
+      });
+      return nextErrors;
+    });
+  };
+
+  const setFriendFormError = (key: string, message: string) => {
+    setFriendFormErrors((current) => ({
+      ...current,
+      [key]: message,
+    }));
+  };
+
+  const toggleEmergencyPasswordVisibility = (id: string) => {
+    setVisibleEmergencyPasswordIds((current) => ({
+      ...current,
+      [id]: !current[id],
+    }));
+  };
+
+  const getMaskedPassword = (password: string): string =>
+    password.length ? '•'.repeat(Math.min(Math.max(password.length, 6), 16)) : '••••••';
+
+  const loadPublicTasksForContact = async (contact: SavedFriendContact) => {
+    setIsLoadingFriendPublicTasks(true);
+    clearFriendFormErrors('editRecipient', 'editTask');
+
+    try {
+      const publicTasks = await window.todoApp.friendNetwork.listPublicTasksForFriend(
+        contact.friendAccountId,
+      );
+      setFriendPublicTasks(publicTasks);
+
+      if (publicTasks.length === 0) {
+        setFriendFormError(
+          'editTask',
+          'That friend has no publicly viewable active tasks right now.',
+        );
+      }
+    } catch (taskLoadError) {
+      setFriendPublicTasks([]);
+      setFriendFormError('editTask', getErrorMessage(taskLoadError));
+    } finally {
+      setIsLoadingFriendPublicTasks(false);
+    }
+  };
+
   const handleTaskSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setError(null);
@@ -2848,16 +3134,17 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
     }
   };
 
-  const handleFriendCodeSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
+  const handleDisplayNameSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setError(null);
 
     try {
-      await window.todoApp.friendNetwork.setFriendCode(friendCodeDraft);
-      setFriendCodeDraft('');
+      const nextStatus = await window.todoApp.account.setDisplayName(displayNameDraft);
+      setAccountStatus(nextStatus);
+      setDisplayNameDraft('');
       await refreshAll();
-    } catch (friendCodeError) {
-      setError(getErrorMessage(friendCodeError));
+    } catch (displayNameError) {
+      setError(getErrorMessage(displayNameError));
     }
   };
 
@@ -2865,18 +3152,25 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
     event.preventDefault();
     setError(null);
 
+    if (!friendContactForm.friendUsername.trim()) {
+      setFriendFormError('contactUsername', 'Type the username for the friend you want to add.');
+      return;
+    }
+
     try {
       const nextContacts = await window.todoApp.friendNetwork.saveContact({
         nickname: friendContactForm.nickname,
-        friendCode: friendContactForm.friendCode,
+        friendUsername: friendContactForm.friendUsername,
+        taskPermission: friendContactForm.taskPermission,
       });
       setFriendContacts(nextContacts);
       setFriendContactForm({
         nickname: '',
-        friendCode: '',
+        friendUsername: '',
+        taskPermission: 'none',
       });
     } catch (contactError) {
-      setError(getErrorMessage(contactError));
+      setFriendFormError('contactUsername', getErrorMessage(contactError));
     }
   };
 
@@ -2891,24 +3185,40 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
     }
   };
 
+  const prepareFriendContactRename = (contact: SavedFriendContact) => {
+    setFriendContactForm({
+      nickname: contact.nickname,
+      friendUsername: contact.friendUsername,
+      taskPermission: contact.taskPermission,
+    });
+  };
+
   const applyContactToPopupForm = (contact: SavedFriendContact) => {
+    clearFriendFormErrors('popupRecipient');
     setFriendPopupForm((current) => ({
       ...current,
-      recipientFriendCode: contact.friendCode,
+      recipientUsername: getFriendContactLabel(contact),
+      recipientAccountId: contact.friendAccountId,
     }));
   };
 
   const applyContactToTaskSuggestionForm = (contact: SavedFriendContact) => {
+    clearFriendFormErrors('taskRecipient');
     setFriendTaskSuggestionForm((current) => ({
       ...current,
-      recipientFriendCode: contact.friendCode,
+      recipientUsername: getFriendContactLabel(contact),
+      recipientAccountId: contact.friendAccountId,
     }));
   };
 
   const applyContactToTaskEditSuggestionForm = (contact: SavedFriendContact) => {
+    void loadPublicTasksForContact(contact);
     setFriendTaskEditSuggestionForm((current) => ({
       ...current,
-      recipientFriendCode: contact.friendCode,
+      recipientUsername: getFriendContactLabel(contact),
+      recipientAccountId: contact.friendAccountId,
+      publicTaskId: '',
+      taskTitle: '',
     }));
   };
 
@@ -2916,9 +3226,30 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
     event.preventDefault();
     setError(null);
 
+    const nextErrors: Record<string, string> = {};
+
+    if (!friendPopupForm.recipientAccountId) {
+      nextErrors.popupRecipient = 'Choose one of your saved friends from the dropdown.';
+    }
+
+    if (!friendPopupForm.message.trim()) {
+      nextErrors.popupMessage = 'Type the message you want to show in the popup.';
+    }
+
+    if (friendPopupForm.isEmergency && !friendPopupForm.emergencyPassword.trim()) {
+      nextErrors.popupEmergencyPassword =
+        'Enter the emergency password this friend gave you.';
+    }
+
+    if (Object.keys(nextErrors).length > 0) {
+      setFriendFormErrors((current) => ({ ...current, ...nextErrors }));
+      return;
+    }
+
     try {
       await window.todoApp.friendNetwork.sendPopup({
-        recipientFriendCode: friendPopupForm.recipientFriendCode,
+        recipientUsername: friendPopupForm.recipientUsername,
+        recipientAccountId: friendPopupForm.recipientAccountId || undefined,
         senderName: friendPopupForm.senderName,
         kind: friendPopupForm.isEmergency ? 'emergency_popup' : 'general_popup',
         priority: friendPopupForm.isEmergency ? 'emergency' : 'normal',
@@ -2933,7 +3264,54 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
         emergencyPassword: '',
       }));
     } catch (friendPopupError) {
-      setError(getErrorMessage(friendPopupError));
+      setFriendFormError('popupMessage', getErrorMessage(friendPopupError));
+    }
+  };
+
+  const handleEmergencyPasswordSubmit = async (
+    event: React.FormEvent<HTMLFormElement>,
+  ) => {
+    event.preventDefault();
+    setError(null);
+
+    const nextErrors: Record<string, string> = {};
+
+    if (!emergencyPasswordForm.friendAccountId) {
+      nextErrors.emergencyFriend = 'Choose which saved friend this password is for.';
+    }
+
+    if (!emergencyPasswordForm.password.trim()) {
+      nextErrors.emergencyPassword = 'Type the password they should use for you.';
+    }
+
+    if (Object.keys(nextErrors).length > 0) {
+      setFriendFormErrors((current) => ({ ...current, ...nextErrors }));
+      return;
+    }
+
+    try {
+      const nextPasswords = await window.todoApp.friendNetwork.saveEmergencyPassword(
+        emergencyPasswordForm,
+      );
+      setEmergencyPasswords(nextPasswords);
+      setEmergencyPasswordForm({
+        friendAccountId: '',
+        password: '',
+      });
+    } catch (passwordError) {
+      setFriendFormError('emergencyPassword', getErrorMessage(passwordError));
+    }
+  };
+
+  const handleEmergencyPasswordDelete = async (grantId: string) => {
+    setError(null);
+
+    try {
+      setEmergencyPasswords(
+        await window.todoApp.friendNetwork.deleteEmergencyPassword(grantId),
+      );
+    } catch (passwordError) {
+      setError(getErrorMessage(passwordError));
     }
   };
 
@@ -2943,15 +3321,27 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
     event.preventDefault();
     setError(null);
 
+    const nextErrors: Record<string, string> = {};
+
+    if (!friendTaskSuggestionForm.recipientAccountId) {
+      nextErrors.taskRecipient = 'Choose one of your saved friends from the dropdown.';
+    }
+
+    if (!friendTaskSuggestionForm.title.trim()) {
+      nextErrors.taskTitle = 'Type the task title you want to suggest.';
+    }
+
+    if (Object.keys(nextErrors).length > 0) {
+      setFriendFormErrors((current) => ({ ...current, ...nextErrors }));
+      return;
+    }
+
     try {
       const taskDraft = buildTaskDraft(friendTaskSuggestionForm);
 
-      if (!taskDraft.title.trim()) {
-        throw new Error('Task title is required.');
-      }
-
       await window.todoApp.friendNetwork.sendPopup({
-        recipientFriendCode: friendTaskSuggestionForm.recipientFriendCode,
+        recipientUsername: friendTaskSuggestionForm.recipientUsername,
+        recipientAccountId: friendTaskSuggestionForm.recipientAccountId || undefined,
         senderName: friendTaskSuggestionForm.senderName,
         kind: 'task_submission',
         priority: 'normal',
@@ -2969,7 +3359,7 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
       });
       setFriendTaskSuggestionForm(createEmptyFriendTaskSuggestionForm());
     } catch (friendTaskError) {
-      setError(getErrorMessage(friendTaskError));
+      setFriendFormError('taskTitle', getErrorMessage(friendTaskError));
     }
   };
 
@@ -2979,11 +3369,23 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
     event.preventDefault();
     setError(null);
 
-    try {
-      if (!friendTaskEditSuggestionForm.taskTitle.trim()) {
-        throw new Error('Exact task title is required for edit suggestions.');
-      }
+    const nextErrors: Record<string, string> = {};
 
+    if (!friendTaskEditSuggestionForm.recipientAccountId) {
+      nextErrors.editRecipient = 'Choose one of your saved friends from the dropdown.';
+    }
+
+    if (!friendTaskEditSuggestionForm.taskTitle.trim()) {
+      nextErrors.editTask =
+        'Choose one of their publicly viewable tasks from the dropdown.';
+    }
+
+    if (Object.keys(nextErrors).length > 0) {
+      setFriendFormErrors((current) => ({ ...current, ...nextErrors }));
+      return;
+    }
+
+    try {
       const today = toLocalDateString(new Date());
       const dueLocalValue = combineLocalDateTimeValue(
         friendTaskEditSuggestionForm.suggestedDueDate,
@@ -3003,12 +3405,22 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
       const suggestedReminderAt = reminderLocalValue
         ? toIsoValue(reminderLocalValue)
         : undefined;
+      const suggestedPriority =
+        friendTaskEditSuggestionForm.suggestedPriority === 'auto'
+          ? undefined
+          : friendTaskEditSuggestionForm.suggestedPriority;
       const changedFields = [
-        friendTaskEditSuggestionForm.suggestedTitle.trim() ? 'title' : null,
-        friendTaskEditSuggestionForm.suggestedNotes.trim() ? 'description' : null,
-        suggestedDueAt ? 'due date' : null,
-        suggestedReminderAt ? 'reminder date' : null,
-        friendTaskEditSuggestionForm.suggestedPriority !== 'auto' ? 'priority' : null,
+        friendTaskEditSuggestionForm.suggestedTitle.trim()
+          ? `Title -> ${friendTaskEditSuggestionForm.suggestedTitle.trim()}`
+          : null,
+        friendTaskEditSuggestionForm.suggestedNotes.trim()
+          ? `Description -> ${friendTaskEditSuggestionForm.suggestedNotes.trim()}`
+          : null,
+        suggestedDueAt ? `Due date -> ${formatSuggestedDateTime(suggestedDueAt)}` : null,
+        suggestedReminderAt
+          ? `Reminder -> ${formatSuggestedDateTime(suggestedReminderAt)}`
+          : null,
+        suggestedPriority ? `Priority -> ${formatPriorityLabel(suggestedPriority)}` : null,
       ].filter((value): value is string => Boolean(value));
 
       if (changedFields.length === 0) {
@@ -3016,28 +3428,26 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
       }
 
       await window.todoApp.friendNetwork.sendPopup({
-        recipientFriendCode: friendTaskEditSuggestionForm.recipientFriendCode,
+        recipientUsername: friendTaskEditSuggestionForm.recipientUsername,
+        recipientAccountId: friendTaskEditSuggestionForm.recipientAccountId || undefined,
         senderName: friendTaskEditSuggestionForm.senderName,
         kind: 'task_edit_suggestion',
         priority: 'normal',
         title: friendTaskEditSuggestionForm.taskTitle,
         relatedTaskTitle: friendTaskEditSuggestionForm.taskTitle,
-        message: `Suggested changes: ${changedFields.join(', ')}.`,
+        message: `Suggested changes:\n${changedFields.join('\n')}`,
         payload: {
           taskTitle: friendTaskEditSuggestionForm.taskTitle,
           suggestedTitle: friendTaskEditSuggestionForm.suggestedTitle,
           suggestedNotes: friendTaskEditSuggestionForm.suggestedNotes,
           suggestedDueAt,
           suggestedReminderAt,
-          suggestedPriority:
-            friendTaskEditSuggestionForm.suggestedPriority === 'auto'
-              ? undefined
-              : friendTaskEditSuggestionForm.suggestedPriority,
+          suggestedPriority,
         },
       });
       setFriendTaskEditSuggestionForm(createEmptyFriendTaskEditSuggestionForm());
     } catch (friendTaskError) {
-      setError(getErrorMessage(friendTaskError));
+      setFriendFormError('editTask', getErrorMessage(friendTaskError));
     }
   };
 
@@ -3116,6 +3526,15 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
   const taskById = new Map(tasks.map((task) => [task.id, task] as const));
   const isDevVariant = appInfo?.isDevVariant ?? true;
   const activeThemePalette = getThemePalette(themeSettings);
+  const networkPanelItems: Array<{
+    id: FriendNetworkPanel;
+    label: string;
+  }> = [
+    { id: 'friends', label: `Friends (${friendContacts.length})` },
+    { id: 'send', label: 'Send' },
+    { id: 'review', label: `Review (${pendingFriendSuggestionCount})` },
+    { id: 'settings', label: 'Settings' },
+  ];
 
   const handleThemePresetChange = (presetId: ThemePresetId) => {
     const nextPreset = THEME_PRESETS.find((preset) => preset.id === presetId);
@@ -3169,7 +3588,7 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
       : activeView === 'history'
       ? 'Look back at passive task completions and routine streaks in one place.'
       : activeView === 'network'
-      ? 'Set your friend code, control DND, and send popup messages to other installed apps.'
+      ? 'Set your display name, control DND, and send popup messages to other installed apps.'
       : 'Review website-submitted tasks and edit suggestions here before they touch your real planner.';
 
   return (
@@ -3376,6 +3795,7 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
 
           {error ? <div className="banner">{error}</div> : null}
 
+          {activeView === 'network' ? (
           <section className="panel-card account-card">
             <div className="panel-top">
               <div>
@@ -3490,6 +3910,7 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
               <p className="field-hint danger-text">{accountStatus.syncError}</p>
             ) : null}
           </section>
+          ) : null}
 
           {activeView === 'today' ? (
             <>
@@ -3556,6 +3977,34 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
                           {
                             TASK_PRIORITY_OPTIONS.find(
                               (option) => option.value === taskFormValues.priority,
+                            )?.description
+                          }
+                        </div>
+                      </div>
+
+                      <div className="field">
+                        <label htmlFor="task-visibility">Friend visibility</label>
+                        <select
+                          id="task-visibility"
+                          value={taskFormValues.visibility}
+                          onChange={(event) => {
+                            const { value } = event.currentTarget;
+                            setTaskFormValues((current) => ({
+                              ...current,
+                              visibility: value as TaskVisibility,
+                            }));
+                          }}
+                        >
+                          {TASK_VISIBILITY_OPTIONS.map((option) => (
+                            <option key={option.value} value={option.value}>
+                              {option.label}
+                            </option>
+                          ))}
+                        </select>
+                        <div className="field-hint">
+                          {
+                            TASK_VISIBILITY_OPTIONS.find(
+                              (option) => option.value === taskFormValues.visibility,
                             )?.description
                           }
                         </div>
@@ -4744,7 +5193,21 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
                 </span>
               </div>
 
+              <div className="network-tabs">
+                {networkPanelItems.map((item) => (
+                  <button
+                    key={item.id}
+                    className={`network-tab ${activeNetworkPanel === item.id ? 'is-active' : ''}`}
+                    type="button"
+                    onClick={() => setActiveNetworkPanel(item.id)}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+
               <div className="list-stack">
+                {activeNetworkPanel === 'settings' ? (
                 <section className="details-panel">
                   <div className="panel-top">
                     <div>
@@ -4760,7 +5223,9 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
                       ) : null}
                     </div>
                     <span className="status-chip accent">
-                      {friendCodes[0]?.code ?? 'no code yet'}
+                      {accountStatus?.session?.displayName ??
+                        accountStatus?.session?.username ??
+                        'sign in'}
                     </span>
                   </div>
 
@@ -4771,89 +5236,116 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
                     </p>
                   ) : null}
 
-                  <form className="composer-form" onSubmit={handleFriendCodeSubmit}>
+                  {accountStatus?.session ? (
+                    <form className="composer-form" onSubmit={handleDisplayNameSubmit}>
                     <div className="field">
-                      <label htmlFor="friend-code">Set a friend code</label>
+                      <label htmlFor="display-name">Your display name</label>
                       <input
-                        id="friend-code"
-                        value={friendCodeDraft}
+                        id="display-name"
+                        value={displayNameDraft}
                         maxLength={64}
-                        placeholder="Any unique code, up to 64 characters"
-                        onChange={(event) => setFriendCodeDraft(event.target.value)}
+                        placeholder={accountStatus.session.displayName ?? 'Optional'}
+                        onChange={(event) => setDisplayNameDraft(event.target.value)}
                       />
                       <p className="field-hint">
-                        Old codes keep forwarding to this device, so changing your code will not
-                        break older shared codes.
+                        Friends add you by @{accountStatus.session.username}. This optional name is
+                        what they see unless they set their own private nickname for you. Save it
+                        blank to fall back to your username.
                       </p>
                     </div>
                     <button className="soft-button primary" type="submit">
-                      Save friend code
+                      Save display name
                     </button>
-                  </form>
+                    </form>
+                  ) : (
+                    <p className="empty-state">
+                      Sign in before using app-to-app friends and popups.
+                    </p>
+                  )}
 
-                  {friendCodes.length ? (
-                    <div className="history-chips">
-                      {friendCodes.slice(0, 3).map((friendCode) => (
-                        <span key={friendCode.id} className="status-chip muted">
-                          {friendCode.code}
-                        </span>
-                      ))}
-                      {friendCodes.length > 3 ? (
-                        <span className="status-chip muted">
-                          +{friendCodes.length - 3} older
-                        </span>
-                      ) : null}
-                    </div>
-                  ) : null}
                 </section>
+                ) : null}
 
+                {activeNetworkPanel === 'friends' ? (
                 <section className="details-panel">
                   <div className="panel-top">
                     <div>
                       <p className="section-kicker">Saved friends</p>
-                      <h4>Nicknames and reusable friend codes</h4>
+                      <h4>Friends saved by username</h4>
                       <p className="field-hint">
-                        Contacts sync with your account. If a saved code stops existing, it will be
-                        removed automatically the next time contacts refresh.
+                        Add friends by username. Your nickname for them is private and never changes
+                        who messages are sent to.
                       </p>
                     </div>
                     <span className="status-chip muted">{friendContacts.length} saved</span>
                   </div>
 
                   {!accountStatus?.session ? (
-                    <p className="empty-state">Sign in to save friend codes across devices.</p>
+                    <p className="empty-state">Sign in to save friends across devices.</p>
                   ) : (
                     <form className="composer-form" onSubmit={handleFriendContactSubmit}>
                       <div className="split-fields">
                         <div className="field">
-                          <label htmlFor="friend-contact-nickname">Nickname</label>
+                          <label htmlFor="friend-contact-nickname">
+                            Private nickname (optional)
+                          </label>
                           <input
                             id="friend-contact-nickname"
                             value={friendContactForm.nickname}
                             maxLength={60}
-                            placeholder="Ally"
+                            placeholder="Defaults to username"
                             onChange={(event) =>
                               setFriendContactForm((current) => ({
                                 ...current,
                                 nickname: event.target.value,
                               }))
                             }
+                            onBlur={() => clearFriendFormErrors('contactNickname')}
                           />
+                          <FieldError message={friendFormErrors.contactNickname} />
                         </div>
                         <div className="field">
-                          <label htmlFor="friend-contact-code">Friend code</label>
+                          <label htmlFor="friend-contact-username">Friend username</label>
                           <input
-                            id="friend-contact-code"
-                            value={friendContactForm.friendCode}
-                            maxLength={64}
-                            placeholder="Their current or older code"
+                            id="friend-contact-username"
+                            value={friendContactForm.friendUsername}
+                            maxLength={40}
+                            placeholder="@username"
                             onChange={(event) =>
                               setFriendContactForm((current) => ({
                                 ...current,
-                                friendCode: event.target.value,
+                                friendUsername: event.target.value.replace(/^@/, ''),
                               }))
                             }
+                            onBlur={() => clearFriendFormErrors('contactUsername')}
                           />
+                          <FieldError message={friendFormErrors.contactUsername} />
+                        </div>
+                      </div>
+                      <div className="field">
+                        <label htmlFor="friend-contact-permission">Task access</label>
+                        <select
+                          id="friend-contact-permission"
+                          value={friendContactForm.taskPermission}
+                          onChange={(event) =>
+                            setFriendContactForm((current) => ({
+                              ...current,
+                              taskPermission: event.target.value as FriendTaskPermission,
+                            }))
+                          }
+                        >
+                          {FRIEND_TASK_PERMISSION_OPTIONS.map((option) => (
+                            <option key={option.value} value={option.value}>
+                              {option.label}
+                            </option>
+                          ))}
+                        </select>
+                        <div className="field-hint">
+                          {
+                            FRIEND_TASK_PERMISSION_OPTIONS.find(
+                              (option) => option.value === friendContactForm.taskPermission,
+                            )?.description
+                          }
                         </div>
                       </div>
                       <button className="soft-button primary" type="submit">
@@ -4868,13 +5360,145 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
                         <article key={contact.id} className="history-row compact-row">
                           <div>
                             <div className="row-title">{contact.nickname}</div>
-                            <div className="row-meta">{contact.friendCode}</div>
+                            <span className="status-chip muted">
+                              {
+                                FRIEND_TASK_PERMISSION_OPTIONS.find(
+                                  (option) => option.value === contact.taskPermission,
+                                )?.label
+                              }
+                            </span>
+                            <div className="row-meta">
+                              {contact.friendDisplayName ?? contact.friendUsername} · @{contact.friendUsername}
+                            </div>
+                          </div>
+                          <div className="row-actions">
+                            <button
+                              className="soft-button"
+                              type="button"
+                              onClick={() => prepareFriendContactRename(contact)}
+                            >
+                              Rename
+                            </button>
+                            <button
+                              className="soft-button"
+                              type="button"
+                              onClick={() => {
+                                void handleFriendContactDelete(contact.id);
+                              }}
+                            >
+                              Remove
+                            </button>
+                          </div>
+                        </article>
+                      ))}
+                    </div>
+                  ) : null}
+                </section>
+                ) : null}
+
+                {activeNetworkPanel === 'friends' ? (
+                <section className="details-panel">
+                  <div className="panel-top">
+                    <div>
+                      <p className="section-kicker">Emergency passwords</p>
+                      <h4>Control who can send you mega popups</h4>
+                      <p className="field-hint">
+                        You set a password for a saved friend. That friend can see the password you
+                        granted them, and only that password can emergency-popup you.
+                      </p>
+                    </div>
+                    <span className="status-chip muted">{emergencyPasswords.length} granted</span>
+                  </div>
+
+                  {!accountStatus?.session || friendContacts.length === 0 ? (
+                    <p className="empty-state">
+                      Sign in and save a friend before granting emergency popup access.
+                    </p>
+                  ) : (
+                    <form className="composer-form" onSubmit={handleEmergencyPasswordSubmit}>
+                      <div className="split-fields">
+                      <div className="field">
+                        <label htmlFor="emergency-friend">Friend</label>
+                        <select
+                            id="emergency-friend"
+                            value={emergencyPasswordForm.friendAccountId}
+                            required
+                            onChange={(event) =>
+                              setEmergencyPasswordForm((current) => ({
+                                ...current,
+                                friendAccountId: event.target.value,
+                              }))
+                            }
+                            onBlur={() => clearFriendFormErrors('emergencyFriend')}
+                          >
+                            <option value="">Choose a saved friend</option>
+                            {friendContacts.map((contact) => (
+                              <option key={contact.id} value={contact.friendAccountId}>
+                                {contact.nickname} (@{contact.friendUsername})
+                              </option>
+                            ))}
+                          </select>
+                          <FieldError message={friendFormErrors.emergencyFriend} />
+                        </div>
+                        <div className="field">
+                          <label htmlFor="emergency-grant-password">Password they use</label>
+                          <input
+                            id="emergency-grant-password"
+                            value={emergencyPasswordForm.password}
+                            required
+                            minLength={1}
+                            maxLength={128}
+                            onChange={(event) =>
+                              setEmergencyPasswordForm((current) => ({
+                                ...current,
+                                password: event.target.value,
+                              }))
+                            }
+                            onBlur={() => clearFriendFormErrors('emergencyPassword')}
+                          />
+                          <FieldError message={friendFormErrors.emergencyPassword} />
+                        </div>
+                      </div>
+                      <button className="soft-button primary" type="submit">
+                        Save password grant
+                      </button>
+                    </form>
+                  )}
+
+                  {emergencyPasswords.length ? (
+                    <div className="list-stack">
+                      {emergencyPasswords.map((grant) => (
+                        <article key={grant.id} className="history-row compact-row">
+                          <div>
+                            <div className="row-title">
+                              {grant.friendNickname ?? grant.friendUsername}
+                            </div>
+                            <div className="row-meta password-row">
+                              <span>
+                                Password:{' '}
+                                {visibleEmergencyPasswordIds[grant.id]
+                                  ? grant.password
+                                  : getMaskedPassword(grant.password)}
+                              </span>
+                              <button
+                                className="icon-button"
+                                type="button"
+                                aria-label={
+                                  visibleEmergencyPasswordIds[grant.id]
+                                    ? 'Hide password'
+                                    : 'Show password'
+                                }
+                                onClick={() => toggleEmergencyPasswordVisibility(grant.id)}
+                              >
+                                {visibleEmergencyPasswordIds[grant.id] ? 'Hide' : 'Show'}
+                              </button>
+                            </div>
                           </div>
                           <button
                             className="soft-button"
                             type="button"
                             onClick={() => {
-                              void handleFriendContactDelete(contact.id);
+                              void handleEmergencyPasswordDelete(grant.id);
                             }}
                           >
                             Remove
@@ -4883,8 +5507,45 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
                       ))}
                     </div>
                   ) : null}
-                </section>
 
+                  {emergencyPasswordsForMe.length ? (
+                    <div className="list-stack">
+                      <p className="field-hint">Passwords friends granted you:</p>
+                      {emergencyPasswordsForMe.map((grant) => (
+                        <article key={grant.id} className="history-row compact-row">
+                          <div>
+                            <div className="row-title">
+                              {grant.friendNickname ?? grant.friendUsername}
+                            </div>
+                            <div className="row-meta password-row">
+                              <span>
+                                Use:{' '}
+                                {visibleEmergencyPasswordIds[grant.id]
+                                  ? grant.password
+                                  : getMaskedPassword(grant.password)}
+                              </span>
+                              <button
+                                className="icon-button"
+                                type="button"
+                                aria-label={
+                                  visibleEmergencyPasswordIds[grant.id]
+                                    ? 'Hide password'
+                                    : 'Show password'
+                                }
+                                onClick={() => toggleEmergencyPasswordVisibility(grant.id)}
+                              >
+                                {visibleEmergencyPasswordIds[grant.id] ? 'Hide' : 'Show'}
+                              </button>
+                            </div>
+                          </div>
+                        </article>
+                      ))}
+                    </div>
+                  ) : null}
+                </section>
+                ) : null}
+
+                {activeNetworkPanel === 'settings' ? (
                 <section className="details-panel">
                   <div className="panel-top">
                     <div>
@@ -4922,7 +5583,9 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
                     Full DND queues everything until you turn DND off.
                   </p>
                 </section>
+                ) : null}
 
+                {activeNetworkPanel === 'review' ? (
                 <section className="details-panel">
                   <div className="panel-top">
                     <div>
@@ -4955,7 +5618,15 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
                               {formatDateTime(popupEvent.createdAt)} · {popupEvent.kind}
                               {popupEvent.senderName ? ` · ${popupEvent.senderName}` : ''}
                             </div>
-                            <p className="row-note">{popupEvent.message}</p>
+                            {popupEvent.kind === 'task_edit_suggestion' ? (
+                              getFriendTaskEditChangeRows(popupEvent).map((changeRow) => (
+                                <p key={changeRow} className="row-note">
+                                  {changeRow}
+                                </p>
+                              ))
+                            ) : (
+                              <p className="row-note">{popupEvent.message}</p>
+                            )}
                           </div>
                           <div className="row-actions">
                             {popupEvent.kind === 'task_submission' ||
@@ -4985,7 +5656,9 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
                     </div>
                   )}
                 </section>
+                ) : null}
 
+                {activeNetworkPanel === 'send' ? (
                 <section className="details-panel">
                   <div className="panel-top">
                     <div>
@@ -4999,34 +5672,23 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
 
                   <form className="composer-form" onSubmit={handleFriendPopupSubmit}>
                     <div className="split-fields">
-                      <div className="field">
-                        <label htmlFor="recipient-code">Recipient friend code</label>
-                        <input
-                          id="recipient-code"
-                          value={friendPopupForm.recipientFriendCode}
-                          maxLength={64}
-                          onChange={(event) =>
-                            setFriendPopupForm((current) => ({
-                              ...current,
-                              recipientFriendCode: event.target.value,
-                            }))
-                          }
-                        />
-                        {friendContacts.length ? (
-                          <div className="contact-chip-row">
-                            {friendContacts.map((contact) => (
-                              <button
-                                key={contact.id}
-                                className="picker-chip"
-                                type="button"
-                                onClick={() => applyContactToPopupForm(contact)}
-                              >
-                                {contact.nickname}
-                              </button>
-                            ))}
-                          </div>
-                        ) : null}
-                      </div>
+                      <FriendRecipientPicker
+                        id="recipient-code"
+                        label="Recipient"
+                        contacts={friendContacts}
+                        value={friendPopupForm.recipientUsername}
+                        selectedAccountId={friendPopupForm.recipientAccountId}
+                        error={friendFormErrors.popupRecipient}
+                        onSelect={applyContactToPopupForm}
+                        onClear={(value) => {
+                          clearFriendFormErrors('popupRecipient');
+                          setFriendPopupForm((current) => ({
+                            ...current,
+                            recipientUsername: value,
+                            recipientAccountId: '',
+                          }));
+                        }}
+                      />
                       <div className="field">
                         <label htmlFor="sender-name">Sender name</label>
                         <input
@@ -5056,7 +5718,9 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
                             message: event.target.value,
                           }))
                         }
+                        onBlur={() => clearFriendFormErrors('popupMessage')}
                       />
+                      <FieldError message={friendFormErrors.popupMessage} />
                     </div>
 
                     <label className="inline-check">
@@ -5087,7 +5751,9 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
                               emergencyPassword: event.target.value,
                             }))
                           }
+                          onBlur={() => clearFriendFormErrors('popupEmergencyPassword')}
                         />
+                        <FieldError message={friendFormErrors.popupEmergencyPassword} />
                       </div>
                     ) : null}
 
@@ -5096,7 +5762,9 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
                     </button>
                   </form>
                 </section>
+                ) : null}
 
+                {activeNetworkPanel === 'send' ? (
                 <section className="details-panel">
                   <div className="panel-top">
                     <div>
@@ -5108,34 +5776,23 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
 
                   <form className="composer-form" onSubmit={handleFriendTaskSuggestionSubmit}>
                     <div className="split-fields">
-                      <div className="field">
-                        <label htmlFor="task-suggestion-recipient">Recipient friend code</label>
-                        <input
-                          id="task-suggestion-recipient"
-                          value={friendTaskSuggestionForm.recipientFriendCode}
-                          maxLength={64}
-                          onChange={(event) =>
-                            setFriendTaskSuggestionForm((current) => ({
-                              ...current,
-                              recipientFriendCode: event.target.value,
-                            }))
-                          }
-                        />
-                        {friendContacts.length ? (
-                          <div className="contact-chip-row">
-                            {friendContacts.map((contact) => (
-                              <button
-                                key={contact.id}
-                                className="picker-chip"
-                                type="button"
-                                onClick={() => applyContactToTaskSuggestionForm(contact)}
-                              >
-                                {contact.nickname}
-                              </button>
-                            ))}
-                          </div>
-                        ) : null}
-                      </div>
+                      <FriendRecipientPicker
+                        id="task-suggestion-recipient"
+                        label="Recipient"
+                        contacts={friendContacts}
+                        value={friendTaskSuggestionForm.recipientUsername}
+                        selectedAccountId={friendTaskSuggestionForm.recipientAccountId}
+                        error={friendFormErrors.taskRecipient}
+                        onSelect={applyContactToTaskSuggestionForm}
+                        onClear={(value) => {
+                          clearFriendFormErrors('taskRecipient');
+                          setFriendTaskSuggestionForm((current) => ({
+                            ...current,
+                            recipientUsername: value,
+                            recipientAccountId: '',
+                          }));
+                        }}
+                      />
                       <div className="field">
                         <label htmlFor="task-suggestion-sender">Sender name</label>
                         <input
@@ -5165,7 +5822,9 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
                             title: event.target.value,
                           }))
                         }
+                        onBlur={() => clearFriendFormErrors('taskTitle')}
                       />
+                      <FieldError message={friendFormErrors.taskTitle} />
                     </div>
 
                     <div className="field">
@@ -5237,50 +5896,45 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
                     </button>
                   </form>
                 </section>
+                ) : null}
 
+                {activeNetworkPanel === 'send' ? (
+                  <>
                 <section className="details-panel">
                   <div className="panel-top">
                     <div>
                       <p className="section-kicker">Suggest edit</p>
                       <h4>Ask a friend to change one of their tasks</h4>
                       <p className="field-hint">
-                        First pass uses the task title as the target. The recipient can accept only
-                        if exactly one local task matches.
+                        Pick from the tasks your friend is publicly sharing, then suggest the
+                        changes you want them to review.
                       </p>
                     </div>
-                    <span className="status-chip muted">by title</span>
+                    <span className="status-chip muted">public tasks</span>
                   </div>
 
                   <form className="composer-form" onSubmit={handleFriendTaskEditSuggestionSubmit}>
                     <div className="split-fields">
-                      <div className="field">
-                        <label htmlFor="task-edit-recipient">Recipient friend code</label>
-                        <input
-                          id="task-edit-recipient"
-                          value={friendTaskEditSuggestionForm.recipientFriendCode}
-                          maxLength={64}
-                          onChange={(event) =>
-                            setFriendTaskEditSuggestionForm((current) => ({
-                              ...current,
-                              recipientFriendCode: event.target.value,
-                            }))
-                          }
-                        />
-                        {friendContacts.length ? (
-                          <div className="contact-chip-row">
-                            {friendContacts.map((contact) => (
-                              <button
-                                key={contact.id}
-                                className="picker-chip"
-                                type="button"
-                                onClick={() => applyContactToTaskEditSuggestionForm(contact)}
-                              >
-                                {contact.nickname}
-                              </button>
-                            ))}
-                          </div>
-                        ) : null}
-                      </div>
+                      <FriendRecipientPicker
+                        id="task-edit-recipient"
+                        label="Recipient"
+                        contacts={friendContacts}
+                        value={friendTaskEditSuggestionForm.recipientUsername}
+                        selectedAccountId={friendTaskEditSuggestionForm.recipientAccountId}
+                        error={friendFormErrors.editRecipient}
+                        onSelect={applyContactToTaskEditSuggestionForm}
+                        onClear={(value) => {
+                          clearFriendFormErrors('editRecipient', 'editTask');
+                          setFriendPublicTasks([]);
+                          setFriendTaskEditSuggestionForm((current) => ({
+                            ...current,
+                            recipientUsername: value,
+                            recipientAccountId: '',
+                            publicTaskId: '',
+                            taskTitle: '',
+                          }));
+                        }}
+                      />
                       <div className="field">
                         <label htmlFor="task-edit-sender">Sender name</label>
                         <input
@@ -5299,18 +5953,40 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
                     </div>
 
                     <div className="field">
-                      <label htmlFor="task-edit-target">Exact task title to edit</label>
-                      <input
+                      <label htmlFor="task-edit-target">Public task to edit</label>
+                      <select
                         id="task-edit-target"
-                        value={friendTaskEditSuggestionForm.taskTitle}
-                        maxLength={160}
-                        onChange={(event) =>
-                          setFriendTaskEditSuggestionForm((current) => ({
-                            ...current,
-                            taskTitle: event.target.value,
-                          }))
+                        value={friendTaskEditSuggestionForm.publicTaskId}
+                        disabled={
+                          !friendTaskEditSuggestionForm.recipientAccountId ||
+                          isLoadingFriendPublicTasks
                         }
-                      />
+                        onChange={(event) =>
+                          {
+                            const selectedTask = friendPublicTasks.find(
+                              (task) => task.id === event.target.value,
+                            );
+                            clearFriendFormErrors('editTask');
+                            setFriendTaskEditSuggestionForm((current) => ({
+                              ...current,
+                              publicTaskId: selectedTask?.id ?? '',
+                              taskTitle: selectedTask?.title ?? '',
+                            }));
+                          }
+                        }
+                      >
+                        <option value="">
+                          {isLoadingFriendPublicTasks
+                            ? 'Loading public tasks...'
+                            : 'Choose a public task'}
+                        </option>
+                        {friendPublicTasks.map((task) => (
+                          <option key={task.id} value={task.id}>
+                            {task.title}
+                          </option>
+                        ))}
+                      </select>
+                      <FieldError message={friendFormErrors.editTask} />
                     </div>
 
                     <div className="split-fields">
@@ -5418,8 +6094,10 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
                     Start app when I sign in
                   </button>
                 </section>
+                  </>
+                ) : null}
 
-                {isDevVariant ? (
+                {activeNetworkPanel === 'review' && isDevVariant ? (
                   <section className="details-panel">
                   <div className="panel-top">
                     <div>
@@ -5717,6 +6395,7 @@ function MiniWindowScreen() {
           reminderTime: composerValues.reminderTime,
           notes: '',
           priority: composerValues.priority,
+          visibility: 'public',
         });
 
         await window.todoApp.tasks.create(taskDraft);

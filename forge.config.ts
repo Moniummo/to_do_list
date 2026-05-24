@@ -33,6 +33,20 @@ const config: ForgeConfig = {
     new MakerRpm({}),
     new MakerDeb({}),
   ],
+  publishers: [
+    {
+      name: '@electron-forge/publisher-github',
+      config: {
+        repository: {
+          owner: 'Moniummo',
+          name: 'to_do_list',
+        },
+        draft: false,
+        prerelease: false,
+        generateReleaseNotes: true,
+      },
+    },
+  ],
   plugins: [
     new AutoUnpackNativesPlugin({}),
     new WebpackPlugin({

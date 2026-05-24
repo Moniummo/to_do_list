@@ -1,44 +1,32 @@
-import { randomUUID } from 'node:crypto';
-import dotenv from 'dotenv';
 import { createClient, type RealtimeChannel } from '@supabase/supabase-js';
+import {
+  getMissingSupabaseConfigKeys,
+  getSupabasePublishableKey,
+  getSupabaseUrl,
+} from './buildConfig';
 import type {
   AppPopupDraft,
   AppPopupEvent,
   AppPopupEventKind,
   AppPopupEventPriority,
   AppPopupEventStatus,
-  FriendCodeAlias,
 } from './types';
 
-dotenv.config();
-
-const SUPABASE_URL_ENV = 'SUPABASE_URL';
-const SUPABASE_PUBLISHABLE_KEY_ENV = 'SUPABASE_PUBLISHABLE_KEY';
-const SUPABASE_APP_DEVICES_TABLE_ENV = 'SUPABASE_APP_DEVICES_TABLE';
-const SUPABASE_FRIEND_CODES_TABLE_ENV = 'SUPABASE_FRIEND_CODES_TABLE';
 const SUPABASE_APP_POPUP_EVENTS_TABLE_ENV = 'SUPABASE_APP_POPUP_EVENTS_TABLE';
-const DEFAULT_SUPABASE_APP_DEVICES_TABLE = 'app_devices';
-const DEFAULT_SUPABASE_FRIEND_CODES_TABLE = 'friend_codes';
 const DEFAULT_SUPABASE_APP_POPUP_EVENTS_TABLE = 'app_popup_events';
-const REGISTER_FRIEND_CODE_RPC = 'register_friend_code';
+const REGISTER_APP_DEVICE_RPC = 'register_app_device';
+const SEND_APP_POPUP_EVENT_RPC = 'send_app_popup_event';
 const PENDING_EVENT_BATCH_SIZE = 100;
 const RECENT_EVENT_LIMIT = 200;
 
-type SupabaseFriendCodeRow = {
-  id: string;
-  code: string;
-  code_normalized: string;
-  device_key: string;
-  created_at: string;
-  retired_at: string | null;
-};
-
 type SupabaseAppPopupEventRow = {
   id: string;
-  recipient_device_key: string;
+  recipient_account_id: string;
+  recipient_device_key: string | null;
+  sender_account_id: string | null;
   sender_device_key: string | null;
   sender_name: string | null;
-  sender_friend_code: string | null;
+  sender_display_name: string | null;
   source: string;
   kind: AppPopupEventKind;
   priority: AppPopupEventPriority;
@@ -54,6 +42,9 @@ type SupabaseAppPopupEventRow = {
 };
 
 type SupabaseFriendNetworkServiceOptions = {
+  accountId: string;
+  accountUsername: string;
+  accountPasswordHash: string;
   deviceKey: string;
   deviceName?: string;
   onPopupEvent: (event: AppPopupEvent) => boolean | void;
@@ -64,25 +55,20 @@ type SupabaseFriendNetworkServiceOptions = {
 export type SupabaseFriendNetworkService = {
   isConfigured: boolean;
   missingEnvKeys: string[];
+  accountId: string;
+  accountUsername: string;
   deviceKey: string;
   deviceName?: string;
   start: () => Promise<void>;
   refresh: () => Promise<void>;
   stop: () => Promise<void>;
   registerDevice: () => Promise<void>;
-  setFriendCode: (code: string) => Promise<FriendCodeAlias>;
-  listFriendCodes: () => Promise<FriendCodeAlias[]>;
   listPendingEvents: () => Promise<AppPopupEvent[]>;
   listRecentEvents: () => Promise<AppPopupEvent[]>;
   sendPopup: (input: AppPopupDraft) => Promise<void>;
   markDelivered: (eventId: string) => Promise<void>;
   updateStatus: (eventId: string, status: AppPopupEventStatus) => Promise<void>;
 };
-
-const getMissingSupabaseEnvKeys = (): string[] =>
-  [SUPABASE_URL_ENV, SUPABASE_PUBLISHABLE_KEY_ENV].filter(
-    (key) => !process.env[key]?.trim(),
-  );
 
 const getTableName = (envKey: string, defaultName: string): string =>
   process.env[envKey]?.trim() || defaultName;
@@ -92,26 +78,17 @@ const normalizeOptionalText = (value?: string | null): string | undefined => {
   return trimmedValue ? trimmedValue : undefined;
 };
 
-const normalizeFriendCode = (value: string): string => value.trim().toLowerCase();
-
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
-const mapFriendCodeRow = (row: SupabaseFriendCodeRow): FriendCodeAlias => ({
-  id: row.id,
-  code: row.code,
-  normalizedCode: row.code_normalized,
-  deviceKey: row.device_key,
-  createdAt: row.created_at,
-  retiredAt: normalizeOptionalText(row.retired_at),
-});
-
 const mapPopupEventRow = (row: SupabaseAppPopupEventRow): AppPopupEvent => ({
   id: row.id,
-  recipientDeviceKey: row.recipient_device_key,
+  recipientAccountId: row.recipient_account_id,
+  recipientDeviceKey: normalizeOptionalText(row.recipient_device_key),
+  senderAccountId: normalizeOptionalText(row.sender_account_id),
   senderDeviceKey: normalizeOptionalText(row.sender_device_key),
   senderName: normalizeOptionalText(row.sender_name),
-  senderFriendCode: normalizeOptionalText(row.sender_friend_code),
+  senderDisplayName: normalizeOptionalText(row.sender_display_name),
   source: row.source,
   kind: row.kind,
   priority: row.priority,
@@ -126,62 +103,45 @@ const mapPopupEventRow = (row: SupabaseAppPopupEventRow): AppPopupEvent => ({
   reviewedAt: normalizeOptionalText(row.reviewed_at),
 });
 
-const buildEventRow = (
-  input: AppPopupDraft,
-  recipientDeviceKey: string,
-  senderDeviceKey: string,
-  senderFriendCode?: string,
-): Record<string, unknown> => ({
-  id: randomUUID(),
-  recipient_device_key: recipientDeviceKey,
-  sender_device_key: senderDeviceKey,
-  sender_name: normalizeOptionalText(input.senderName) ?? null,
-  sender_friend_code: senderFriendCode ?? null,
-  source: 'desktop',
-  kind: input.kind,
-  priority: input.priority,
-  title: normalizeOptionalText(input.title) ?? null,
-  message: input.message.trim(),
-  related_task_id: normalizeOptionalText(input.relatedTaskId) ?? null,
-  related_task_title: normalizeOptionalText(input.relatedTaskTitle) ?? null,
-  payload: input.payload ?? {},
-  status: 'pending',
-});
+const eventColumns =
+  'id, recipient_account_id, recipient_device_key, sender_account_id, sender_device_key, sender_name, sender_display_name, source, kind, priority, title, message, related_task_id, related_task_title, payload, status, created_at, delivered_at, reviewed_at';
 
 export const createSupabaseFriendNetworkService = ({
+  accountId,
+  accountUsername,
+  accountPasswordHash,
   deviceKey,
   deviceName,
   onPopupEvent,
   onChanged,
   onError,
 }: SupabaseFriendNetworkServiceOptions): SupabaseFriendNetworkService => {
-  const missingEnvKeys = getMissingSupabaseEnvKeys();
+  const missingEnvKeys = getMissingSupabaseConfigKeys();
+  const disabledService: SupabaseFriendNetworkService = {
+    isConfigured: false,
+    missingEnvKeys,
+    accountId,
+    accountUsername,
+    deviceKey,
+    deviceName,
+    start: async () => undefined,
+    refresh: async () => undefined,
+    stop: async () => undefined,
+    registerDevice: async () => undefined,
+    listPendingEvents: async () => [],
+    listRecentEvents: async () => [],
+    sendPopup: async () => undefined,
+    markDelivered: async () => undefined,
+    updateStatus: async () => undefined,
+  };
 
   if (missingEnvKeys.length > 0) {
-    return {
-      isConfigured: false,
-      missingEnvKeys,
-      deviceKey,
-      deviceName,
-      start: async () => undefined,
-      refresh: async () => undefined,
-      stop: async () => undefined,
-      registerDevice: async () => undefined,
-      setFriendCode: async () => {
-        throw new Error('Supabase friend network is not configured.');
-      },
-      listFriendCodes: async () => [],
-      listPendingEvents: async () => [],
-      listRecentEvents: async () => [],
-      sendPopup: async () => undefined,
-      markDelivered: async () => undefined,
-      updateStatus: async () => undefined,
-    };
+    return disabledService;
   }
 
   const supabase = createClient(
-    process.env[SUPABASE_URL_ENV] as string,
-    process.env[SUPABASE_PUBLISHABLE_KEY_ENV] as string,
+    getSupabaseUrl() as string,
+    getSupabasePublishableKey() as string,
     {
       auth: {
         persistSession: false,
@@ -189,15 +149,6 @@ export const createSupabaseFriendNetworkService = ({
         detectSessionInUrl: false,
       },
     },
-  );
-
-  const devicesTable = getTableName(
-    SUPABASE_APP_DEVICES_TABLE_ENV,
-    DEFAULT_SUPABASE_APP_DEVICES_TABLE,
-  );
-  const friendCodesTable = getTableName(
-    SUPABASE_FRIEND_CODES_TABLE_ENV,
-    DEFAULT_SUPABASE_FRIEND_CODES_TABLE,
   );
   const popupEventsTable = getTableName(
     SUPABASE_APP_POPUP_EVENTS_TABLE_ENV,
@@ -207,93 +158,24 @@ export const createSupabaseFriendNetworkService = ({
   let channel: RealtimeChannel | null = null;
 
   const registerDevice = async (): Promise<void> => {
-    const { error } = await supabase.from(devicesTable).upsert(
-      [
-        {
-          device_key: deviceKey,
-          device_name: deviceName ?? null,
-          last_seen_at: new Date().toISOString(),
-        },
-      ],
-      {
-        onConflict: 'device_key',
-      },
-    );
+    const { error } = await supabase.rpc(REGISTER_APP_DEVICE_RPC, {
+      p_account_id: accountId,
+      p_password_hash: accountPasswordHash,
+      p_device_key: deviceKey,
+      p_device_name: deviceName ?? null,
+    });
 
     if (error) {
       onError(`Supabase app device ${deviceKey} could not be registered.`, error);
     }
   };
 
-  const listFriendCodes = async (): Promise<FriendCodeAlias[]> => {
-    const { data, error } = await supabase
-      .from(friendCodesTable)
-      .select('id, code, code_normalized, device_key, created_at, retired_at')
-      .eq('device_key', deviceKey)
-      .order('created_at', {
-        ascending: false,
-      })
-      .limit(100);
-
-    if (error) {
-      onError('Supabase friend codes could not be loaded.', error);
-      return [];
-    }
-
-    return (data ?? []).map((row) => mapFriendCodeRow(row as SupabaseFriendCodeRow));
-  };
-
-  const getCurrentFriendCode = async (): Promise<string | undefined> =>
-    (await listFriendCodes())[0]?.code;
-
-  const setFriendCode = async (code: string): Promise<FriendCodeAlias> => {
-    await registerDevice();
-
-    const { data, error } = await supabase.rpc(REGISTER_FRIEND_CODE_RPC, {
-      p_device_key: deviceKey,
-      p_code: code,
-    });
-
-    if (error) {
-      onError('Supabase friend code could not be registered.', error);
-      throw new Error('Friend code could not be registered. It may already be in use.');
-    }
-
-    return mapFriendCodeRow(data as SupabaseFriendCodeRow);
-  };
-
-  const resolveFriendCode = async (code: string): Promise<SupabaseFriendCodeRow> => {
-    const normalizedCode = normalizeFriendCode(code);
-    const { data, error } = await supabase
-      .from(friendCodesTable)
-      .select('id, code, code_normalized, device_key, created_at, retired_at')
-      .eq('code_normalized', normalizedCode)
-      .limit(1);
-
-    if (error) {
-      onError(`Supabase friend code "${code}" could not be resolved.`, error);
-      throw new Error('Friend code could not be looked up.');
-    }
-
-    const row = data?.[0] as SupabaseFriendCodeRow | undefined;
-
-    if (!row) {
-      throw new Error(`No friend is using the code "${code}".`);
-    }
-
-    return row;
-  };
-
   const listPendingEvents = async (): Promise<AppPopupEvent[]> => {
     const { data, error } = await supabase
       .from(popupEventsTable)
-      .select(
-        'id, recipient_device_key, sender_device_key, sender_name, sender_friend_code, source, kind, priority, title, message, related_task_id, related_task_title, payload, status, created_at, delivered_at, reviewed_at',
-      )
-      .eq('recipient_device_key', deviceKey)
-      .order('created_at', {
-        ascending: false,
-      })
+      .select(eventColumns)
+      .eq('recipient_account_id', accountId)
+      .order('created_at', { ascending: false })
       .limit(PENDING_EVENT_BATCH_SIZE);
 
     if (error) {
@@ -315,13 +197,9 @@ export const createSupabaseFriendNetworkService = ({
   const listRecentEvents = async (): Promise<AppPopupEvent[]> => {
     const { data, error } = await supabase
       .from(popupEventsTable)
-      .select(
-        'id, recipient_device_key, sender_device_key, sender_name, sender_friend_code, source, kind, priority, title, message, related_task_id, related_task_title, payload, status, created_at, delivered_at, reviewed_at',
-      )
-      .eq('recipient_device_key', deviceKey)
-      .order('created_at', {
-        ascending: false,
-      })
+      .select(eventColumns)
+      .eq('recipient_account_id', accountId)
+      .order('created_at', { ascending: false })
       .limit(RECENT_EVENT_LIMIT);
 
     if (error) {
@@ -336,10 +214,8 @@ export const createSupabaseFriendNetworkService = ({
     eventId: string,
     status: AppPopupEventStatus,
   ): Promise<void> => {
+    const updates: Record<string, unknown> = { status };
     const now = new Date().toISOString();
-    const updates: Record<string, unknown> = {
-      status,
-    };
 
     if (status === 'delivered') {
       updates.delivered_at = now;
@@ -359,22 +235,17 @@ export const createSupabaseFriendNetworkService = ({
   };
 
   const handleIncomingEvent = async (event: AppPopupEvent): Promise<void> => {
-    if (handledEventIds.has(event.id)) {
-      if (event.status === 'pending') {
-        await updateStatus(event.id, 'delivered');
-        onChanged();
-      }
-
-      return;
-    }
-
     if (event.status !== 'pending') {
       return;
     }
 
-    const wasHandled = onPopupEvent(event) !== false;
+    if (handledEventIds.has(event.id)) {
+      await updateStatus(event.id, 'delivered');
+      onChanged();
+      return;
+    }
 
-    if (wasHandled) {
+    if (onPopupEvent(event) !== false) {
       handledEventIds.add(event.id);
     }
 
@@ -390,10 +261,9 @@ export const createSupabaseFriendNetworkService = ({
   };
 
   return {
+    ...disabledService,
     isConfigured: true,
     missingEnvKeys: [],
-    deviceKey,
-    deviceName,
     start: async () => {
       await registerDevice();
       await loadPendingEvents();
@@ -403,14 +273,14 @@ export const createSupabaseFriendNetworkService = ({
       }
 
       channel = supabase
-        .channel(`friend-network-${deviceKey}`)
+        .channel(`friend-network-${accountId}-${deviceKey}`)
         .on(
           'postgres_changes',
           {
             event: '*',
             schema: 'public',
             table: popupEventsTable,
-            filter: `recipient_device_key=eq.${deviceKey}`,
+            filter: `recipient_account_id=eq.${accountId}`,
           },
           (payload: { eventType?: unknown; new?: unknown }) => {
             if (payload.eventType === 'INSERT' && payload.new) {
@@ -423,12 +293,8 @@ export const createSupabaseFriendNetworkService = ({
           },
         )
         .subscribe((status: string) => {
-          if (status === 'CHANNEL_ERROR') {
-            onError('Supabase friend network realtime subscription hit a channel error.');
-          }
-
-          if (status === 'TIMED_OUT') {
-            onError('Supabase friend network realtime subscription timed out.');
+          if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+            onError(`Supabase friend network realtime subscription ${status.toLowerCase()}.`);
           }
         });
     },
@@ -436,47 +302,47 @@ export const createSupabaseFriendNetworkService = ({
     stop: async () => {
       handledEventIds.clear();
 
-      if (!channel) {
-        return;
+      if (channel) {
+        await supabase.removeChannel(channel);
+        channel = null;
       }
-
-      await supabase.removeChannel(channel);
-      channel = null;
     },
     registerDevice,
-    setFriendCode,
-    listFriendCodes,
     listPendingEvents,
     listRecentEvents,
-    sendPopup: async (input: AppPopupDraft) => {
+    sendPopup: async (input) => {
       if (!input.message.trim()) {
         throw new Error('Message is required.');
       }
 
       await registerDevice();
-
-      const recipientFriendCode = await resolveFriendCode(input.recipientFriendCode);
-      const senderFriendCode = await getCurrentFriendCode();
-      const { error } = await supabase.from(popupEventsTable).upsert(
-        [
-          buildEventRow(
-            input,
-            recipientFriendCode.device_key,
-            deviceKey,
-            senderFriendCode,
-          ),
-        ],
-        {
-          onConflict: 'id',
-        },
-      );
+      const { error } = await supabase.rpc(SEND_APP_POPUP_EVENT_RPC, {
+        p_account_id: accountId,
+        p_password_hash: accountPasswordHash,
+        p_device_key: deviceKey,
+        p_recipient_username: input.recipientUsername,
+        p_recipient_account_id: input.recipientAccountId ?? null,
+        p_sender_name: normalizeOptionalText(input.senderName) ?? null,
+        p_kind: input.kind,
+        p_priority: input.priority,
+        p_title: normalizeOptionalText(input.title) ?? null,
+        p_message: input.message.trim(),
+        p_related_task_id: normalizeOptionalText(input.relatedTaskId) ?? null,
+        p_related_task_title: normalizeOptionalText(input.relatedTaskTitle) ?? null,
+        p_payload: input.payload ?? {},
+        p_emergency_password: normalizeOptionalText(input.emergencyPassword) ?? null,
+      });
 
       if (error) {
         onError('Supabase app popup event could not be sent.', error);
-        throw new Error('Popup could not be sent.');
+        throw new Error(
+          input.priority === 'emergency'
+            ? 'Emergency popup could not be sent. Check that friend password.'
+            : 'Popup could not be sent. Check the username or saved friend.',
+        );
       }
     },
-    markDelivered: async (eventId: string) => {
+    markDelivered: async (eventId) => {
       await updateStatus(eventId, 'delivered');
     },
     updateStatus,

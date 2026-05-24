@@ -7,10 +7,12 @@ import type {
   AppPopupDraft,
   AppPopupEvent,
   AppSelection,
-  FriendCodeAlias,
+  EmergencyPasswordGrant,
+  EmergencyPasswordGrantDraft,
   FriendNetworkStatus,
   HistoryDayPayload,
   PopupCloseReason,
+  PublicSharedTask,
   RoutineDraft,
   RoutineHistoryPayload,
   RoutineHistorySummary,
@@ -86,6 +88,8 @@ const api: TodoAppApi = {
       ipcRenderer.invoke('account:signIn', credentials) as Promise<AccountStatus>,
     signOut: () => ipcRenderer.invoke('account:signOut') as Promise<AccountStatus>,
     syncNow: () => ipcRenderer.invoke('account:syncNow') as Promise<AccountStatus>,
+    setDisplayName: (displayName: string) =>
+      ipcRenderer.invoke('account:setDisplayName', displayName) as Promise<AccountStatus>,
     onChanged: (listener: () => void) => {
       accountChangeListeners.add(listener);
 
@@ -204,16 +208,33 @@ const api: TodoAppApi = {
       ipcRenderer.invoke('friendNetwork:status') as Promise<FriendNetworkStatus>,
     setDndMode: (mode: AppDndMode) =>
       ipcRenderer.invoke('friendNetwork:setDndMode', mode) as Promise<FriendNetworkStatus>,
-    listFriendCodes: () =>
-      ipcRenderer.invoke('friendNetwork:listFriendCodes') as Promise<FriendCodeAlias[]>,
-    setFriendCode: (code: string) =>
-      ipcRenderer.invoke('friendNetwork:setFriendCode', code) as Promise<FriendCodeAlias>,
     listContacts: () =>
       ipcRenderer.invoke('friendNetwork:listContacts') as Promise<SavedFriendContact[]>,
     saveContact: (input: SavedFriendContactDraft) =>
       ipcRenderer.invoke('friendNetwork:saveContact', input) as Promise<SavedFriendContact[]>,
     deleteContact: (id: string) =>
       ipcRenderer.invoke('friendNetwork:deleteContact', id) as Promise<SavedFriendContact[]>,
+    listPublicTasksForFriend: (friendAccountId: string) =>
+      ipcRenderer.invoke(
+        'friendNetwork:listPublicTasksForFriend',
+        friendAccountId,
+      ) as Promise<PublicSharedTask[]>,
+    listEmergencyPasswords: () =>
+      ipcRenderer.invoke('friendNetwork:listEmergencyPasswords') as Promise<
+        EmergencyPasswordGrant[]
+      >,
+    listEmergencyPasswordsForMe: () =>
+      ipcRenderer.invoke('friendNetwork:listEmergencyPasswordsForMe') as Promise<
+        EmergencyPasswordGrant[]
+      >,
+    saveEmergencyPassword: (input: EmergencyPasswordGrantDraft) =>
+      ipcRenderer.invoke('friendNetwork:saveEmergencyPassword', input) as Promise<
+        EmergencyPasswordGrant[]
+      >,
+    deleteEmergencyPassword: (id: string) =>
+      ipcRenderer.invoke('friendNetwork:deleteEmergencyPassword', id) as Promise<
+        EmergencyPasswordGrant[]
+      >,
     listPendingEvents: () =>
       ipcRenderer.invoke('friendNetwork:listPendingEvents') as Promise<AppPopupEvent[]>,
     listRecentEvents: () =>

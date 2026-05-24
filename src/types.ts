@@ -1,5 +1,7 @@
 export type TaskStatus = 'pending' | 'completed';
 export type TaskPriority = 'auto' | 'high' | 'medium' | 'low';
+export type TaskVisibility = 'public' | 'private';
+export type FriendTaskPermission = 'none' | 'public' | 'all';
 
 export interface Task {
   id: string;
@@ -11,6 +13,7 @@ export interface Task {
   completedAt?: string;
   notes?: string;
   priority?: TaskPriority;
+  visibility?: TaskVisibility;
 }
 
 export interface TaskDraft {
@@ -19,6 +22,7 @@ export interface TaskDraft {
   reminderAt?: string;
   notes?: string;
   priority?: TaskPriority;
+  visibility?: TaskVisibility;
 }
 
 export interface TaskUpdate {
@@ -28,6 +32,7 @@ export interface TaskUpdate {
   reminderAt?: string | null;
   notes?: string | null;
   priority?: TaskPriority | null;
+  visibility?: TaskVisibility | null;
 }
 
 export type TimeBlockStatus = 'planned' | 'completed' | 'missed';
@@ -216,27 +221,19 @@ export type PopupCloseReason = 'dismiss' | 'open';
 export interface AppDevice {
   deviceKey: string;
   deviceName?: string;
-  currentFriendCode?: string;
   createdAt: string;
   updatedAt: string;
   lastSeenAt?: string;
 }
 
-export interface FriendCodeAlias {
-  id: string;
-  code: string;
-  normalizedCode: string;
-  deviceKey: string;
-  createdAt: string;
-  retiredAt?: string;
-}
-
 export interface AppPopupEvent {
   id: string;
-  recipientDeviceKey: string;
+  recipientAccountId: string;
+  recipientDeviceKey?: string;
+  senderAccountId?: string;
   senderDeviceKey?: string;
   senderName?: string;
-  senderFriendCode?: string;
+  senderDisplayName?: string;
   source: string;
   kind: AppPopupEventKind;
   priority: AppPopupEventPriority;
@@ -252,7 +249,8 @@ export interface AppPopupEvent {
 }
 
 export interface AppPopupDraft {
-  recipientFriendCode: string;
+  recipientUsername: string;
+  recipientAccountId?: string;
   senderName?: string;
   kind: AppPopupEventKind;
   priority: AppPopupEventPriority;
@@ -279,6 +277,7 @@ export interface AccountCredentials {
 export interface AccountSession {
   accountId: string;
   username: string;
+  displayName?: string;
 }
 
 export interface AccountStatus {
@@ -292,9 +291,11 @@ export interface AccountStatus {
 export interface SavedFriendContact {
   id: string;
   accountId: string;
+  friendAccountId: string;
+  friendUsername: string;
+  friendDisplayName?: string;
   nickname: string;
-  friendCode: string;
-  normalizedFriendCode: string;
+  taskPermission: FriendTaskPermission;
   createdAt: string;
   updatedAt: string;
   lastResolvedAt?: string;
@@ -302,7 +303,8 @@ export interface SavedFriendContact {
 
 export interface SavedFriendContactDraft {
   nickname: string;
-  friendCode: string;
+  friendUsername: string;
+  taskPermission?: FriendTaskPermission;
 }
 
 export interface FriendNetworkStatus {
@@ -313,6 +315,38 @@ export interface FriendNetworkStatus {
   dndMode: AppDndMode;
   profileName?: string;
   hasRecentPopupPassword: boolean;
+  accountUsername?: string;
+}
+
+export interface EmergencyPasswordGrant {
+  id: string;
+  ownerAccountId: string;
+  friendAccountId: string;
+  friendUsername: string;
+  friendDisplayName?: string;
+  friendNickname?: string;
+  password: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface EmergencyPasswordGrantDraft {
+  friendAccountId: string;
+  password: string;
+}
+
+export interface PublicSharedTask {
+  id: string;
+  kind: 'task' | 'routine';
+  sourceId: string;
+  title: string;
+  dueAt?: string;
+  reminderAt?: string;
+  scheduledDate?: string;
+  priority?: string;
+  ruleSummary?: string;
+  visibility: TaskVisibility;
+  updatedAt: string;
 }
 
 export interface TaskCompletionDateUpdate {
@@ -346,6 +380,7 @@ export interface TodoAppApi {
     signIn: (credentials: AccountCredentials) => Promise<AccountStatus>;
     signOut: () => Promise<AccountStatus>;
     syncNow: () => Promise<AccountStatus>;
+    setDisplayName: (displayName: string) => Promise<AccountStatus>;
     onChanged: (listener: () => void) => () => void;
   };
   tasks: {
@@ -399,11 +434,16 @@ export interface TodoAppApi {
   friendNetwork: {
     status: () => Promise<FriendNetworkStatus>;
     setDndMode: (mode: AppDndMode) => Promise<FriendNetworkStatus>;
-    listFriendCodes: () => Promise<FriendCodeAlias[]>;
-    setFriendCode: (code: string) => Promise<FriendCodeAlias>;
     listContacts: () => Promise<SavedFriendContact[]>;
     saveContact: (input: SavedFriendContactDraft) => Promise<SavedFriendContact[]>;
     deleteContact: (id: string) => Promise<SavedFriendContact[]>;
+    listPublicTasksForFriend: (friendAccountId: string) => Promise<PublicSharedTask[]>;
+    listEmergencyPasswords: () => Promise<EmergencyPasswordGrant[]>;
+    listEmergencyPasswordsForMe: () => Promise<EmergencyPasswordGrant[]>;
+    saveEmergencyPassword: (
+      input: EmergencyPasswordGrantDraft,
+    ) => Promise<EmergencyPasswordGrant[]>;
+    deleteEmergencyPassword: (id: string) => Promise<EmergencyPasswordGrant[]>;
     listPendingEvents: () => Promise<AppPopupEvent[]>;
     listRecentEvents: () => Promise<AppPopupEvent[]>;
     sendPopup: (input: AppPopupDraft) => Promise<void>;

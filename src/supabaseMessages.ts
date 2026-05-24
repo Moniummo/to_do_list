@@ -1,10 +1,9 @@
-import dotenv from 'dotenv';
 import { createClient, type RealtimeChannel } from '@supabase/supabase-js';
-
-dotenv.config();
-
-const SUPABASE_URL_ENV = 'SUPABASE_URL';
-const SUPABASE_PUBLISHABLE_KEY_ENV = 'SUPABASE_PUBLISHABLE_KEY';
+import {
+  getMissingSupabaseConfigKeys,
+  getSupabasePublishableKey,
+  getSupabaseUrl,
+} from './buildConfig';
 const SUPABASE_MESSAGES_TABLE = 'tasks';
 
 export type SupabaseMessageRow = {
@@ -32,16 +31,11 @@ type SupabaseMessageService = {
 
 const SUPABASE_MESSAGE_BATCH_SIZE = 100;
 
-const getMissingSupabaseEnvKeys = (): string[] =>
-  [SUPABASE_URL_ENV, SUPABASE_PUBLISHABLE_KEY_ENV].filter(
-    (key) => !process.env[key]?.trim(),
-  );
-
 export const createSupabaseMessageService = ({
   onMessage,
   onError,
 }: SupabaseMessageServiceOptions): SupabaseMessageService => {
-  const missingEnvKeys = getMissingSupabaseEnvKeys();
+  const missingEnvKeys = getMissingSupabaseConfigKeys();
 
   if (missingEnvKeys.length > 0) {
     return {
@@ -54,8 +48,8 @@ export const createSupabaseMessageService = ({
   }
 
   const supabase = createClient(
-    process.env[SUPABASE_URL_ENV] as string,
-    process.env[SUPABASE_PUBLISHABLE_KEY_ENV] as string,
+    getSupabaseUrl() as string,
+    getSupabasePublishableKey() as string,
     {
       auth: {
         persistSession: false,

@@ -127,9 +127,7 @@ textarea {
   align-content: start;
   gap: 18px;
   padding: 20px 18px;
-  background:
-    linear-gradient(180deg, var(--sidebar), var(--bg)),
-    linear-gradient(180deg, var(--accent-soft), transparent);
+  background: linear-gradient(180deg, var(--sidebar), var(--bg));
   border-right: 1px solid var(--line);
 }
 
@@ -182,6 +180,7 @@ textarea {
 .soft-button,
 .collapse-button,
 .fab-button,
+.icon-button,
 .mini-item {
   border: 1px solid var(--line);
   background: rgba(255, 255, 255, 0.04);
@@ -370,6 +369,26 @@ textarea {
 
 .compact-row {
   align-items: center;
+}
+
+.password-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.icon-button {
+  width: auto;
+  border-radius: 999px;
+  padding: 4px 9px;
+  font-size: 0.76rem;
+  color: var(--muted);
+}
+
+.icon-button:hover {
+  color: var(--text);
+  border-color: var(--line-strong);
 }
 
 .danger-text {
@@ -788,10 +807,91 @@ body[data-app-variant='user'] .danger-text {
 
 .banner {
   padding: 12px 14px;
-  border: 1px solid rgba(59, 130, 246, 0.28);
+  border: 1px solid rgba(248, 113, 113, 0.35);
   border-radius: 12px;
-  background: rgba(37, 99, 235, 0.12);
-  color: #bfdbfe;
+  background: rgba(127, 29, 29, 0.3);
+  color: #fecaca;
+}
+
+.field-error {
+  margin: -2px 0 0;
+  padding: 8px 10px;
+  border: 1px solid rgba(248, 113, 113, 0.28);
+  border-radius: 10px;
+  background: rgba(127, 29, 29, 0.24);
+  color: #fecaca;
+  font-size: 0.82rem;
+  line-height: 1.35;
+}
+
+.friend-search-field {
+  position: relative;
+}
+
+.friend-search-menu {
+  display: grid;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.025));
+}
+
+.friend-search-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 10px;
+  border: 1px solid transparent;
+  border-radius: 11px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+}
+
+.friend-search-option small,
+.friend-search-empty {
+  color: var(--muted);
+}
+
+.friend-search-option:hover,
+.friend-search-option.is-selected {
+  border-color: var(--line-strong);
+  background: var(--accent-soft);
+}
+
+.friend-search-empty {
+  margin: 0;
+  padding: 8px 10px;
+  font-size: 0.84rem;
+}
+
+.network-tabs {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.network-tab {
+  flex: 1 1 120px;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  padding: 10px 12px;
+  background: transparent;
+  color: var(--muted);
+}
+
+.network-tab.is-active,
+.network-tab:hover {
+  border-color: var(--line-strong);
+  background: var(--accent-soft);
+  color: var(--text);
 }
 
 .danger-link {
@@ -1354,6 +1454,39 @@ body[data-app-variant='user'] .danger-text {
 
 .reminder-popup-actions .soft-button {
   flex: 1 1 0;
+}
+
+@media (max-width: 440px), (max-height: 300px) {
+  .reminder-popup {
+    gap: 12px;
+    padding: 14px;
+  }
+
+  .reminder-popup-copy {
+    gap: 5px;
+  }
+
+  .reminder-popup-subject {
+    font-size: clamp(1rem, 5vw, 1.22rem);
+  }
+
+  .reminder-popup-field-label {
+    margin-top: 6px;
+  }
+
+  .reminder-popup-body,
+  .reminder-popup-field-value {
+    font-size: 0.92rem;
+  }
+
+  .reminder-popup-actions {
+    gap: 8px;
+  }
+
+  .reminder-popup-actions .soft-button {
+    min-height: 42px;
+    padding: 9px 10px;
+  }
 }
 
 @media (max-width: 980px) {

@@ -1,30 +1,39 @@
 import { createHash } from 'node:crypto';
-import dotenv from 'dotenv';
 import { createClient } from '@supabase/supabase-js';
+import {
+  getMissingSupabaseConfigKeys,
+  getSupabasePublishableKey,
+  getSupabaseUrl,
+} from './buildConfig';
 import type {
   AccountCredentials,
   AccountSession,
+  EmergencyPasswordGrant,
+  EmergencyPasswordGrantDraft,
+  FriendTaskPermission,
   PlannerState,
   SavedFriendContact,
   SavedFriendContactDraft,
 } from './types';
 
-dotenv.config();
-
-const SUPABASE_URL_ENV = 'SUPABASE_URL';
-const SUPABASE_PUBLISHABLE_KEY_ENV = 'SUPABASE_PUBLISHABLE_KEY';
 const CREATE_ACCOUNT_RPC = 'create_app_account';
 const LOGIN_ACCOUNT_RPC = 'login_app_account';
 const LOAD_PLANNER_RPC = 'load_app_planner_state';
 const SAVE_PLANNER_RPC = 'save_app_planner_state';
+const SET_DISPLAY_NAME_RPC = 'set_app_display_name';
 const LIST_CONTACTS_RPC = 'list_app_friend_contacts';
 const UPSERT_CONTACT_RPC = 'upsert_app_friend_contact';
 const DELETE_CONTACT_RPC = 'delete_app_friend_contact';
+const LIST_EMERGENCY_PASSWORDS_RPC = 'list_app_emergency_passwords';
+const LIST_EMERGENCY_PASSWORDS_FOR_ME_RPC = 'list_app_emergency_passwords_for_me';
+const UPSERT_EMERGENCY_PASSWORD_RPC = 'upsert_app_emergency_password';
+const DELETE_EMERGENCY_PASSWORD_RPC = 'delete_app_emergency_password';
 const PASSWORD_HASH_NAMESPACE = 'to-do-list-account-v1';
 
 type AccountRpcRow = {
   account_id: string;
   username: string;
+  display_name: string | null;
   planner_state: unknown;
   planner_state_updated_at: string;
 };
@@ -41,12 +50,26 @@ type SavePlannerRpcRow = {
 type ContactRpcRow = {
   contact_id: string;
   contact_account_id: string;
+  contact_friend_account_id: string;
+  contact_friend_username: string;
+  contact_friend_display_name: string | null;
   contact_nickname: string;
-  contact_friend_code: string;
-  contact_friend_code_normalized: string;
+  contact_task_permission: FriendTaskPermission | null;
   contact_created_at: string;
   contact_updated_at: string;
   contact_last_resolved_at: string | null;
+};
+
+type EmergencyPasswordRpcRow = {
+  grant_id: string;
+  grant_owner_account_id: string;
+  grant_friend_account_id: string;
+  grant_friend_username: string;
+  grant_friend_display_name: string | null;
+  grant_friend_nickname: string | null;
+  grant_password: string;
+  grant_created_at: string;
+  grant_updated_at: string;
 };
 
 export type AccountSyncSession = AccountSession & {
@@ -75,26 +98,45 @@ export type SupabaseAccountSyncService = {
     session: AccountSyncSession,
     plannerState: PlannerState,
   ) => Promise<string>;
+  setDisplayName: (
+    session: AccountSyncSession,
+    displayName: string,
+  ) => Promise<AccountSyncSession>;
   listContacts: (session: AccountSyncSession) => Promise<SavedFriendContact[]>;
   saveContact: (
     session: AccountSyncSession,
     input: SavedFriendContactDraft,
   ) => Promise<SavedFriendContact>;
   deleteContact: (session: AccountSyncSession, contactId: string) => Promise<void>;
+  listEmergencyPasswords: (session: AccountSyncSession) => Promise<EmergencyPasswordGrant[]>;
+  listEmergencyPasswordsForMe: (
+    session: AccountSyncSession,
+  ) => Promise<EmergencyPasswordGrant[]>;
+  saveEmergencyPassword: (
+    session: AccountSyncSession,
+    input: EmergencyPasswordGrantDraft,
+  ) => Promise<EmergencyPasswordGrant>;
+  deleteEmergencyPassword: (session: AccountSyncSession, grantId: string) => Promise<void>;
 };
 
 type ServiceOptions = {
   onError: (message: string, error?: unknown) => void;
 };
 
-const getMissingSupabaseEnvKeys = (): string[] =>
-  [SUPABASE_URL_ENV, SUPABASE_PUBLISHABLE_KEY_ENV].filter(
-    (key) => !process.env[key]?.trim(),
-  );
-
 const normalizeOptionalText = (value?: string | null): string | undefined => {
   const trimmedValue = value?.trim();
   return trimmedValue ? trimmedValue : undefined;
+};
+
+const getSupabaseErrorMessage = (error: unknown): string | undefined => {
+  if (!error || typeof error !== 'object' || !('message' in error)) {
+    return undefined;
+  }
+
+  const errorWithMessage = error as { message?: unknown };
+  return normalizeOptionalText(
+    typeof errorWithMessage.message === 'string' ? errorWithMessage.message : undefined,
+  );
 };
 
 const normalizeUsername = (username: string): string => {
@@ -105,6 +147,19 @@ const normalizeUsername = (username: string): string => {
   }
 
   return normalizedUsername;
+};
+
+const normalizeFriendNickname = (
+  nickname: string,
+  friendUsername: string,
+): string => {
+  const normalizedNickname = nickname.trim() || normalizeUsername(friendUsername);
+
+  if (normalizedNickname.length > 60) {
+    throw new Error('Friend nickname must be 60 characters or fewer.');
+  }
+
+  return normalizedNickname;
 };
 
 const hashPassword = ({ username, password }: AccountCredentials): string => {
@@ -167,6 +222,7 @@ const mapAccountRow = (
   session: {
     accountId: row.account_id,
     username: row.username,
+    displayName: normalizeOptionalText(row.display_name),
     passwordHash,
   },
   plannerState: normalizePlannerState(row.planner_state),
@@ -176,18 +232,37 @@ const mapAccountRow = (
 const mapContactRow = (row: ContactRpcRow): SavedFriendContact => ({
   id: row.contact_id,
   accountId: row.contact_account_id,
+  friendAccountId: row.contact_friend_account_id,
+  friendUsername: row.contact_friend_username,
+  friendDisplayName: normalizeOptionalText(row.contact_friend_display_name),
   nickname: row.contact_nickname,
-  friendCode: row.contact_friend_code,
-  normalizedFriendCode: row.contact_friend_code_normalized,
+  taskPermission:
+    row.contact_task_permission === 'public' || row.contact_task_permission === 'all'
+      ? row.contact_task_permission
+      : 'none',
   createdAt: row.contact_created_at,
   updatedAt: row.contact_updated_at,
   lastResolvedAt: normalizeOptionalText(row.contact_last_resolved_at),
 });
 
+const mapEmergencyPasswordRow = (
+  row: EmergencyPasswordRpcRow,
+): EmergencyPasswordGrant => ({
+  id: row.grant_id,
+  ownerAccountId: row.grant_owner_account_id,
+  friendAccountId: row.grant_friend_account_id,
+  friendUsername: row.grant_friend_username,
+  friendDisplayName: normalizeOptionalText(row.grant_friend_display_name),
+  friendNickname: normalizeOptionalText(row.grant_friend_nickname),
+  password: row.grant_password,
+  createdAt: row.grant_created_at,
+  updatedAt: row.grant_updated_at,
+});
+
 export const createSupabaseAccountSyncService = ({
   onError,
 }: ServiceOptions): SupabaseAccountSyncService => {
-  const missingEnvKeys = getMissingSupabaseEnvKeys();
+  const missingEnvKeys = getMissingSupabaseConfigKeys();
 
   if (missingEnvKeys.length > 0) {
     return {
@@ -205,17 +280,26 @@ export const createSupabaseAccountSyncService = ({
       savePlannerState: async () => {
         throw new Error('Supabase account sync is not configured.');
       },
+      setDisplayName: async () => {
+        throw new Error('Supabase account sync is not configured.');
+      },
       listContacts: async () => [],
       saveContact: async () => {
         throw new Error('Supabase account sync is not configured.');
       },
       deleteContact: async () => undefined,
+      listEmergencyPasswords: async () => [],
+      listEmergencyPasswordsForMe: async () => [],
+      saveEmergencyPassword: async () => {
+        throw new Error('Supabase account sync is not configured.');
+      },
+      deleteEmergencyPassword: async () => undefined,
     };
   }
 
   const supabase = createClient(
-    process.env[SUPABASE_URL_ENV] as string,
-    process.env[SUPABASE_PUBLISHABLE_KEY_ENV] as string,
+    getSupabaseUrl() as string,
+    getSupabasePublishableKey() as string,
     {
       auth: {
         persistSession: false,
@@ -291,6 +375,24 @@ export const createSupabaseAccountSyncService = ({
       const row = getFirstRpcRow<SavePlannerRpcRow>(data);
       return row.planner_state_updated_at;
     },
+    setDisplayName: async (session, displayName) => {
+      const { data, error } = await supabase.rpc(SET_DISPLAY_NAME_RPC, {
+        ...buildSessionArgs(session),
+        p_display_name: displayName,
+      });
+
+      if (error) {
+        onError('Supabase display name could not be saved.', error);
+        throw new Error('Display name could not be saved.');
+      }
+
+      const row = getFirstRpcRow<AccountRpcRow>(data);
+      return {
+        ...session,
+        username: row.username,
+        displayName: normalizeOptionalText(row.display_name),
+      };
+    },
     listContacts: async (session) => {
       const { data, error } = await supabase.rpc(LIST_CONTACTS_RPC, buildSessionArgs(session));
 
@@ -304,15 +406,22 @@ export const createSupabaseAccountSyncService = ({
       );
     },
     saveContact: async (session, input) => {
+      const friendUsername = normalizeUsername(input.friendUsername);
       const { data, error } = await supabase.rpc(UPSERT_CONTACT_RPC, {
         ...buildSessionArgs(session),
-        p_friend_code: input.friendCode,
-        p_nickname: input.nickname,
+        p_friend_username: friendUsername,
+        p_nickname: normalizeFriendNickname(input.nickname, friendUsername),
+        p_task_permission: input.taskPermission ?? 'none',
       });
 
       if (error) {
         onError('Supabase saved friend contact could not be saved.', error);
-        throw new Error('Saved friend could not be saved. Check that the friend code exists.');
+        const errorMessage = getSupabaseErrorMessage(error);
+        throw new Error(
+          errorMessage
+            ? `Saved friend could not be saved: ${errorMessage}`
+            : 'Saved friend could not be saved. Check that username exists.',
+        );
       }
 
       return mapContactRow(getFirstRpcRow<ContactRpcRow>(data));
@@ -326,6 +435,66 @@ export const createSupabaseAccountSyncService = ({
       if (error) {
         onError('Supabase saved friend contact could not be deleted.', error);
         throw new Error('Saved friend could not be deleted.');
+      }
+    },
+    listEmergencyPasswords: async (session) => {
+      const { data, error } = await supabase.rpc(
+        LIST_EMERGENCY_PASSWORDS_RPC,
+        buildSessionArgs(session),
+      );
+
+      if (error) {
+        onError('Supabase emergency passwords could not be loaded.', error);
+        return [];
+      }
+
+      return (Array.isArray(data) ? data : []).map((row) =>
+        mapEmergencyPasswordRow(row as EmergencyPasswordRpcRow),
+      );
+    },
+    listEmergencyPasswordsForMe: async (session) => {
+      const { data, error } = await supabase.rpc(
+        LIST_EMERGENCY_PASSWORDS_FOR_ME_RPC,
+        buildSessionArgs(session),
+      );
+
+      if (error) {
+        onError('Supabase granted emergency passwords could not be loaded.', error);
+        return [];
+      }
+
+      return (Array.isArray(data) ? data : []).map((row) =>
+        mapEmergencyPasswordRow(row as EmergencyPasswordRpcRow),
+      );
+    },
+    saveEmergencyPassword: async (session, input) => {
+      const { data, error } = await supabase.rpc(UPSERT_EMERGENCY_PASSWORD_RPC, {
+        ...buildSessionArgs(session),
+        p_friend_account_id: input.friendAccountId,
+        p_password: input.password,
+      });
+
+      if (error) {
+        onError('Supabase emergency password could not be saved.', error);
+        const errorMessage = getSupabaseErrorMessage(error);
+        throw new Error(
+          errorMessage
+            ? `Emergency password could not be saved: ${errorMessage}`
+            : 'Emergency password could not be saved for that friend.',
+        );
+      }
+
+      return mapEmergencyPasswordRow(getFirstRpcRow<EmergencyPasswordRpcRow>(data));
+    },
+    deleteEmergencyPassword: async (session, grantId) => {
+      const { error } = await supabase.rpc(DELETE_EMERGENCY_PASSWORD_RPC, {
+        ...buildSessionArgs(session),
+        p_grant_id: grantId,
+      });
+
+      if (error) {
+        onError('Supabase emergency password could not be deleted.', error);
+        throw new Error('Emergency password could not be removed.');
       }
     },
   };

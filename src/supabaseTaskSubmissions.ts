@@ -1,11 +1,10 @@
-import dotenv from 'dotenv';
 import { createClient, type RealtimeChannel } from '@supabase/supabase-js';
+import {
+  getMissingSupabaseConfigKeys,
+  getSupabasePublishableKey,
+  getSupabaseUrl,
+} from './buildConfig';
 import type { WebsiteTaskSubmission } from './types';
-
-dotenv.config();
-
-const SUPABASE_URL_ENV = 'SUPABASE_URL';
-const SUPABASE_PUBLISHABLE_KEY_ENV = 'SUPABASE_PUBLISHABLE_KEY';
 const SUPABASE_TASK_SUBMISSIONS_TABLE_ENV = 'SUPABASE_TASK_SUBMISSIONS_TABLE';
 const DEFAULT_SUPABASE_TASK_SUBMISSIONS_TABLE = 'task_submissions';
 
@@ -38,11 +37,6 @@ export type SupabaseTaskSubmissionService = {
   dismiss: (id: string) => Promise<void>;
 };
 
-const getMissingSupabaseEnvKeys = (): string[] =>
-  [SUPABASE_URL_ENV, SUPABASE_PUBLISHABLE_KEY_ENV].filter(
-    (key) => !process.env[key]?.trim(),
-  );
-
 const getTaskSubmissionsTableName = (): string =>
   process.env[SUPABASE_TASK_SUBMISSIONS_TABLE_ENV]?.trim() ||
   DEFAULT_SUPABASE_TASK_SUBMISSIONS_TABLE;
@@ -66,7 +60,7 @@ export const createSupabaseTaskSubmissionService = ({
   onSubmission,
   onError,
 }: SupabaseTaskSubmissionServiceOptions): SupabaseTaskSubmissionService => {
-  const missingEnvKeys = getMissingSupabaseEnvKeys();
+  const missingEnvKeys = getMissingSupabaseConfigKeys();
 
   if (missingEnvKeys.length > 0) {
     return {
@@ -82,8 +76,8 @@ export const createSupabaseTaskSubmissionService = ({
   }
 
   const supabase = createClient(
-    process.env[SUPABASE_URL_ENV] as string,
-    process.env[SUPABASE_PUBLISHABLE_KEY_ENV] as string,
+    getSupabaseUrl() as string,
+    getSupabasePublishableKey() as string,
     {
       auth: {
         persistSession: false,

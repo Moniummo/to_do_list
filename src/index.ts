@@ -1,6 +1,6 @@
 import os from 'node:os';
 import path from 'node:path';
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import {
   app,
   BrowserWindow,
@@ -13,6 +13,8 @@ import {
   Tray,
 } from 'electron';
 import Store from 'electron-store';
+import { updateElectronApp, UpdateSourceType } from 'update-electron-app';
+import { getBuildAppVariant } from './buildConfig';
 import {
   createLocalDateTime,
   compareLocalDateStrings,
@@ -68,7 +70,6 @@ import type {
   AppPopupEventStatus,
   AppVariant,
   AppSelection,
-  FriendCodeAlias,
   FriendNetworkStatus,
   HistoryDayPayload,
   PlannerState,
@@ -93,6 +94,9 @@ import type {
   TimeBlockUpdate,
   SavedFriendContact,
   SavedFriendContactDraft,
+  EmergencyPasswordGrant,
+  EmergencyPasswordGrantDraft,
+  PublicSharedTask,
   WebsiteTaskEditSuggestion,
   WebsiteTaskSubmission,
 } from './types';
@@ -144,23 +148,21 @@ const SUPABASE_FRIEND_NETWORK_POLL_INTERVAL_MS = 10_000;
 const SUPABASE_PRESENCE_DEVICE_ID_ENV = 'SUPABASE_PRESENCE_DEVICE_ID';
 const SUPABASE_PRESENCE_DEVICE_NAME_ENV = 'SUPABASE_PRESENCE_DEVICE_NAME';
 const WEBSITE_EMERGENCY_MESSAGE_SOURCE = 'website-emergency';
-const EMERGENCY_POPUP_PASSWORD_ENV = 'EMERGENCY_POPUP_PASSWORD';
-const EMERGENCY_POPUP_PASSWORDS_ENV = 'EMERGENCY_POPUP_PASSWORDS';
-const VITE_EMERGENCY_POPUP_PASSWORD_ENV = 'VITE_EMERGENCY_POPUP_PASSWORD';
-const VITE_EMERGENCY_POPUP_PASSWORDS_ENV = 'VITE_EMERGENCY_POPUP_PASSWORDS';
-const LEGACY_EMERGENCY_POPUP_PASSWORD_HASH_ENV = 'VITE_EMERGENCY_POPUP_PASSWORD_HASH';
-const LEGACY_EMERGENCY_POPUP_PASSWORD_HASHES_ENV = 'VITE_EMERGENCY_POPUP_PASSWORD_HASHES';
 const FRIEND_NETWORK_DND_MODE_KEY = 'friendNetworkDndMode';
 const FRIEND_NETWORK_RECENT_PASSWORD_KEY = 'friendNetworkRecentPopupPassword';
 const ACCOUNT_ID_KEY = 'syncAccountId';
 const ACCOUNT_USERNAME_KEY = 'syncAccountUsername';
+const ACCOUNT_DISPLAY_NAME_KEY = 'syncAccountDisplayName';
 const ACCOUNT_PASSWORD_HASH_KEY = 'syncAccountPasswordHash';
 const ACCOUNT_LAST_SYNCED_AT_KEY = 'syncAccountLastSyncedAt';
 const ACCOUNT_SYNC_DEBOUNCE_MS = 1_200;
 const ACCOUNT_SYNC_PULL_INTERVAL_MS = 30_000;
 
 const getAppVariant = (): AppVariant =>
-  process.env[TODO_APP_VARIANT_ENV]?.trim().toLowerCase() === 'user' ? 'user' : 'dev';
+  process.env[TODO_APP_VARIANT_ENV]?.trim().toLowerCase() === 'user' ||
+  getBuildAppVariant() === 'user'
+    ? 'user'
+    : 'dev';
 
 const appVariant = getAppVariant();
 const isDevVariant = (): boolean => appVariant === 'dev';
@@ -169,6 +171,21 @@ const getAppInfo = (): AppInfo => ({
   variant: appVariant,
   isDevVariant: isDevVariant(),
 });
+
+const startUserBuildAutoUpdates = (): void => {
+  if (!app.isPackaged || appVariant !== 'user') {
+    return;
+  }
+
+  updateElectronApp({
+    updateSource: {
+      type: UpdateSourceType.ElectronPublicUpdateService,
+      repo: 'Moniummo/to_do_list',
+    },
+    updateInterval: '10 minutes',
+    notifyUser: true,
+  });
+};
 
 const getLocalDevProfileName = (): string | undefined => {
   const profileName = process.env[TODO_PROFILE_ENV]?.trim();
@@ -185,7 +202,9 @@ const toStorageSafeProfileName = (value: string): string =>
 const localDevProfileName = getLocalDevProfileName();
 const localDevProfileStorageName = localDevProfileName
   ? toStorageSafeProfileName(localDevProfileName)
-  : undefined;
+  : appVariant === 'user'
+    ? 'user'
+    : undefined;
 
 if (localDevProfileStorageName) {
   app.setPath(
@@ -295,39 +314,6 @@ const normalizeOptionalText = (value?: string | null): string | undefined => {
   return trimmedValue ? trimmedValue : undefined;
 };
 
-const hashSecret = (value: string): string =>
-  createHash('sha256').update(value).digest('hex');
-
-const splitConfiguredSecrets = (value?: string): string[] =>
-  (value ?? '')
-    .split(/[\n,;]+/)
-    .map((entry) => entry.trim())
-    .filter(Boolean);
-
-const getEmergencyPopupPasswordSecrets = (): string[] => [
-  ...splitConfiguredSecrets(process.env[EMERGENCY_POPUP_PASSWORDS_ENV]),
-  ...splitConfiguredSecrets(process.env[EMERGENCY_POPUP_PASSWORD_ENV]),
-  ...splitConfiguredSecrets(process.env[VITE_EMERGENCY_POPUP_PASSWORDS_ENV]),
-  ...splitConfiguredSecrets(process.env[VITE_EMERGENCY_POPUP_PASSWORD_ENV]),
-  ...splitConfiguredSecrets(process.env[LEGACY_EMERGENCY_POPUP_PASSWORD_HASHES_ENV]),
-  ...splitConfiguredSecrets(process.env[LEGACY_EMERGENCY_POPUP_PASSWORD_HASH_ENV]),
-];
-
-const verifyEmergencyPopupPassword = (password?: string): boolean => {
-  const submittedSecret = normalizeOptionalText(password);
-
-  if (!submittedSecret) {
-    return false;
-  }
-
-  const submittedHash = hashSecret(submittedSecret);
-
-  return getEmergencyPopupPasswordSecrets().some(
-    (configuredSecret) =>
-      submittedSecret === configuredSecret || submittedHash === configuredSecret,
-  );
-};
-
 const getStoredStringValue = (key: string): string | undefined => {
   const value = taskStoreAccess.get(key, '');
   return typeof value === 'string' ? normalizeOptionalText(value) : undefined;
@@ -337,6 +323,7 @@ const getStoredAccountSession = (): AccountSyncSession | undefined => {
   const accountId = getStoredStringValue(ACCOUNT_ID_KEY);
   const username = getStoredStringValue(ACCOUNT_USERNAME_KEY);
   const passwordHash = getStoredStringValue(ACCOUNT_PASSWORD_HASH_KEY);
+  const displayName = getStoredStringValue(ACCOUNT_DISPLAY_NAME_KEY);
 
   if (!accountId || !username || !passwordHash) {
     return undefined;
@@ -345,6 +332,7 @@ const getStoredAccountSession = (): AccountSyncSession | undefined => {
   return {
     accountId,
     username,
+    displayName,
     passwordHash,
   };
 };
@@ -352,12 +340,14 @@ const getStoredAccountSession = (): AccountSyncSession | undefined => {
 const storeAccountSession = (session: AccountSyncSession): void => {
   taskStoreAccess.set(ACCOUNT_ID_KEY, session.accountId);
   taskStoreAccess.set(ACCOUNT_USERNAME_KEY, session.username);
+  taskStoreAccess.set(ACCOUNT_DISPLAY_NAME_KEY, session.displayName ?? '');
   taskStoreAccess.set(ACCOUNT_PASSWORD_HASH_KEY, session.passwordHash);
 };
 
 const clearAccountSession = (): void => {
   taskStoreAccess.set(ACCOUNT_ID_KEY, '');
   taskStoreAccess.set(ACCOUNT_USERNAME_KEY, '');
+  taskStoreAccess.set(ACCOUNT_DISPLAY_NAME_KEY, '');
   taskStoreAccess.set(ACCOUNT_PASSWORD_HASH_KEY, '');
   taskStoreAccess.set(ACCOUNT_LAST_SYNCED_AT_KEY, '');
   savedFriendContacts = [];
@@ -373,6 +363,7 @@ const getAccountStatus = (): AccountStatus => {
       ? {
           accountId: session.accountId,
           username: session.username,
+          displayName: session.displayName,
         }
       : undefined,
     lastSyncedAt: getStoredStringValue(ACCOUNT_LAST_SYNCED_AT_KEY),
@@ -492,6 +483,7 @@ const getFriendNetworkStatus = (): FriendNetworkStatus => ({
   missingEnvKeys: supabaseFriendNetworkMissingEnvKeys,
   deviceKey: getSupabasePresenceDeviceId(),
   deviceName: getSupabasePresenceDeviceName(),
+  accountUsername: getStoredAccountSession()?.username,
   dndMode: getAppDndMode(),
   profileName: localDevProfileName,
   hasRecentPopupPassword: hasRecentPopupPassword(),
@@ -1346,6 +1338,7 @@ const createTask = (input: TaskDraft): Task => {
     reminderAt: normalizeOptionalDateTime(input.reminderAt),
     notes: normalizeOptionalText(input.notes),
     priority: normalizeTaskPriority(input.priority),
+    visibility: input.visibility === 'private' ? 'private' : 'public',
   };
 
   state.oneOffTasks.push(task);
@@ -1405,22 +1398,42 @@ const getTaskSubmissionPopupPayload = (
   selection: websiteQueueSelection,
 });
 
-const getTaskEditSuggestionChangedFields = (
+const formatSuggestedPopupDate = (value?: string): string | undefined =>
+  value ? reminderFormatter.format(new Date(value)) : undefined;
+
+const formatPriorityForPopup = (value?: TaskPriority): string =>
+  value ? `${value.slice(0, 1).toUpperCase()}${value.slice(1)}` : 'Auto';
+
+const getTaskEditSuggestionChangeDetails = (
   suggestion: WebsiteTaskEditSuggestion,
 ): string[] =>
   [
-    suggestion.changeTitle ? 'title' : null,
-    suggestion.changeNotes ? 'description' : null,
-    suggestion.changeDueAt ? 'due date' : null,
-    suggestion.changeReminderAt ? 'reminder date' : null,
-    suggestion.changePriority ? 'priority' : null,
+    suggestion.changeTitle
+      ? `Title -> ${normalizeOptionalText(suggestion.suggestedTitle) ?? 'Missing title'}`
+      : null,
+    suggestion.changeNotes
+      ? `Description -> ${
+          normalizeOptionalText(suggestion.suggestedNotes) ?? 'Clear description'
+        }`
+      : null,
+    suggestion.changeDueAt
+      ? `Due date -> ${formatSuggestedPopupDate(suggestion.suggestedDueAt) ?? 'Clear due date'}`
+      : null,
+    suggestion.changeReminderAt
+      ? `Reminder -> ${
+          formatSuggestedPopupDate(suggestion.suggestedReminderAt) ?? 'Clear reminder'
+        }`
+      : null,
+    suggestion.changePriority
+      ? `Priority -> ${formatPriorityForPopup(suggestion.suggestedPriority)}`
+      : null,
   ].filter((value): value is string => Boolean(value));
 
 const getTaskEditSuggestionPopupPayload = (
   suggestion: WebsiteTaskEditSuggestion,
 ): ReminderPopupPayload => ({
   title: suggestion.taskTitleSnapshot,
-  body: `Suggested changes: ${getTaskEditSuggestionChangedFields(suggestion).join(', ')}.`,
+  body: `Suggested changes:\n${getTaskEditSuggestionChangeDetails(suggestion).join('\n')}`,
   contextLabel: 'Task Edit Suggestion',
   contextValue: normalizeOptionalText(suggestion.senderName),
   selection: websiteQueueSelection,
@@ -1590,6 +1603,12 @@ const updateTask = (input: TaskUpdate): Task[] => {
       input.priority === undefined
         ? currentTask.priority ?? 'auto'
         : normalizeTaskPriority(input.priority),
+    visibility:
+      input.visibility === undefined
+        ? currentTask.visibility ?? 'public'
+        : input.visibility === 'private'
+          ? 'private'
+          : 'public',
   };
 
   const savedState = persistState(state);
@@ -2178,6 +2197,17 @@ const getReminderPopupDisplay = (displayId: number) =>
 const getReminderPopupAnchorDisplay = () =>
   screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
 
+const getReminderPopupSize = (): { width: number; height: number } => {
+  const workArea = getReminderPopupAnchorDisplay().workArea;
+  const horizontalRoom = Math.max(280, workArea.width - REMINDER_POPUP_MARGIN * 2);
+  const verticalRoom = Math.max(220, workArea.height - REMINDER_POPUP_MARGIN * 2);
+
+  return {
+    width: Math.min(REMINDER_POPUP_WIDTH, horizontalRoom),
+    height: Math.min(REMINDER_POPUP_HEIGHT, verticalRoom),
+  };
+};
+
 const getQueuedReminderPopupCount = (): number =>
   Math.max(0, reminderPopupQueue.length - MAX_VISIBLE_REMINDER_POPUPS);
 
@@ -2255,8 +2285,23 @@ const closeMegaPopupWindow = (): void => {
   megaPopupWindow = null;
 };
 
-const showMegaReminderPopup = (payload: ReminderPopupPayload): void => {
-  closeMegaPopupWindow();
+type MegaPopupQueueEntry = {
+  id: string;
+  payload: ReminderPopupPayload;
+};
+
+let megaPopupQueue: MegaPopupQueueEntry[] = [];
+
+const syncMegaPopupQueue = (): void => {
+  if (megaPopupWindow && !megaPopupWindow.isDestroyed()) {
+    return;
+  }
+
+  const nextPopup = megaPopupQueue[0];
+
+  if (!nextPopup) {
+    return;
+  }
 
   const anchorDisplay = getReminderPopupAnchorDisplay();
   const window = new BrowserWindow({
@@ -2280,7 +2325,10 @@ const showMegaReminderPopup = (payload: ReminderPopupPayload): void => {
   });
 
   megaPopupWindow = window;
-  window.loadURL(buildReminderPopupUrl(payload));
+  window.loadURL(buildReminderPopupUrl({
+    ...nextPopup.payload,
+    queuedCount: Math.max(0, megaPopupQueue.length - 1),
+  }));
 
   window.once('ready-to-show', () => {
     const display = getReminderPopupAnchorDisplay();
@@ -2296,6 +2344,8 @@ const showMegaReminderPopup = (payload: ReminderPopupPayload): void => {
     if (megaPopupWindow === window) {
       megaPopupWindow = null;
     }
+    megaPopupQueue = megaPopupQueue.filter(({ id }) => id !== nextPopup.id);
+    syncMegaPopupQueue();
   });
 };
 
@@ -2338,9 +2388,10 @@ const removeReminderPopupWindow = (targetWindow: BrowserWindow): void => {
 
 const createReminderPopupWindow = (queuedPopup: QueuedReminderPopup): void => {
   const payload = getReminderPopupPayloadForWindow(queuedPopup);
+  const popupSize = getReminderPopupSize();
   const window = new BrowserWindow({
-    width: REMINDER_POPUP_WIDTH,
-    height: REMINDER_POPUP_HEIGHT,
+    width: popupSize.width,
+    height: popupSize.height,
     resizable: false,
     minimizable: false,
     maximizable: false,
@@ -2435,11 +2486,39 @@ const dismissReminderPopupWindow = (
   return true;
 };
 
+const dismissMegaPopupWindow = (
+  targetWindow: BrowserWindow,
+  reason: PopupCloseReason = 'dismiss',
+): boolean => {
+  if (!megaPopupWindow || megaPopupWindow !== targetWindow) {
+    return false;
+  }
+
+  const popupEntry = megaPopupQueue[0];
+
+  if (popupEntry) {
+    void updateFriendNetworkEventStatusFromPayload(
+      popupEntry.payload,
+      reason === 'open' ? 'opened' : 'dismissed',
+    );
+  }
+
+  if (!targetWindow.isDestroyed()) {
+    targetWindow.close();
+  }
+
+  return true;
+};
+
 const showReminderPopup = (payload: ReminderPopupPayload): void => {
   markFriendNetworkEventDeliveredFromPayload(payload);
 
   if (payload.presentation === 'mega') {
-    showMegaReminderPopup(payload);
+    megaPopupQueue.push({
+      id: randomUUID(),
+      payload,
+    });
+    syncMegaPopupQueue();
     return;
   }
 
@@ -2578,34 +2657,72 @@ const getFriendNetworkEventLabel = (event: AppPopupEvent): string => {
   return 'General Reminder';
 };
 
-const getSavedContactNicknameForCode = (friendCode?: string): string | undefined => {
-  const normalizedFriendCode = friendCode?.trim().toLowerCase();
+const getSavedContactNickname = (friendAccountId?: string): string | undefined => {
+  if (friendAccountId) {
+    const matchingAccountContact = savedFriendContacts.find(
+      (contact) => contact.friendAccountId === friendAccountId,
+    );
 
-  if (!normalizedFriendCode) {
-    return undefined;
+    if (matchingAccountContact) {
+      return matchingAccountContact.nickname;
+    }
   }
 
-  return savedFriendContacts.find(
-    (contact) => contact.normalizedFriendCode === normalizedFriendCode,
-  )?.nickname;
+  return undefined;
 };
 
 const formatFriendNetworkSenderLabel = (event: AppPopupEvent): string | undefined => {
   const senderName = normalizeOptionalText(event.senderName);
-  const nickname = getSavedContactNicknameForCode(event.senderFriendCode);
+  const nickname = getSavedContactNickname(event.senderAccountId);
+  const displayName = normalizeOptionalText(event.senderDisplayName);
 
   if (senderName && nickname) {
     return `${senderName} (${nickname})`;
   }
 
-  return senderName ?? nickname;
+  if (senderName && displayName) {
+    return `${senderName} (${displayName})`;
+  }
+
+  return senderName ?? nickname ?? displayName;
 };
+
+const getFriendTaskEditEventChangeDetails = (event: AppPopupEvent): string[] => {
+  const rows = [
+    getPayloadString(event.payload, 'suggestedTitle')
+      ? `Title -> ${getPayloadString(event.payload, 'suggestedTitle')}`
+      : null,
+    getPayloadString(event.payload, 'suggestedNotes')
+      ? `Description -> ${getPayloadString(event.payload, 'suggestedNotes')}`
+      : null,
+    getPayloadString(event.payload, 'suggestedDueAt')
+      ? `Due date -> ${formatSuggestedPopupDate(getPayloadString(event.payload, 'suggestedDueAt'))}`
+      : null,
+    getPayloadString(event.payload, 'suggestedReminderAt')
+      ? `Reminder -> ${formatSuggestedPopupDate(
+          getPayloadString(event.payload, 'suggestedReminderAt'),
+        )}`
+      : null,
+    getPayloadString(event.payload, 'suggestedPriority')
+      ? `Priority -> ${formatPriorityForPopup(
+          getPayloadString(event.payload, 'suggestedPriority') as TaskPriority,
+        )}`
+      : null,
+  ].filter((value): value is string => Boolean(value));
+
+  return rows.length ? rows : [event.message];
+};
+
+const getFriendNetworkPopupBody = (event: AppPopupEvent): string =>
+  event.kind === 'task_edit_suggestion'
+    ? `Suggested changes:\n${getFriendTaskEditEventChangeDetails(event).join('\n')}`
+    : event.message;
 
 const getFriendNetworkEventPopupPayload = (
   event: AppPopupEvent,
 ): ReminderPopupPayload => ({
   title: event.relatedTaskTitle ?? event.title ?? '',
-  body: event.message,
+  body: getFriendNetworkPopupBody(event),
   selection:
     event.kind === 'task_submission' || event.kind === 'task_edit_suggestion'
       ? friendNetworkSelection
@@ -2743,11 +2860,10 @@ const startSupabaseMessageFeed = async (): Promise<void> => {
 };
 
 const startSupabaseSharedTaskFeed = async (): Promise<void> => {
-  if (!isDevVariant()) {
-    return;
-  }
+  const session = getStoredAccountSession();
 
   const service = createSupabaseSharedTaskService({
+    accountId: session?.accountId,
     onError: (message, error) => {
       console.error(message, error);
     },
@@ -2836,7 +2952,28 @@ const startSupabaseTaskEditSuggestionFeed = async (): Promise<void> => {
 };
 
 const startSupabaseFriendNetworkFeed = async (): Promise<void> => {
+  const session = getStoredAccountSession();
+
+  if (supabaseFriendNetworkPollInterval) {
+    clearInterval(supabaseFriendNetworkPollInterval);
+    supabaseFriendNetworkPollInterval = null;
+  }
+
+  if (supabaseFriendNetworkService) {
+    await supabaseFriendNetworkService.stop();
+    supabaseFriendNetworkService = null;
+  }
+
+  if (!session) {
+    supabaseFriendNetworkMissingEnvKeys = [];
+    broadcastFriendNetworkChange();
+    return;
+  }
+
   const service = createSupabaseFriendNetworkService({
+    accountId: session.accountId,
+    accountUsername: session.username,
+    accountPasswordHash: session.passwordHash,
     deviceKey: getSupabasePresenceDeviceId(),
     deviceName: getSupabasePresenceDeviceName(),
     onChanged: () => {
@@ -3018,6 +3155,8 @@ const completeAccountSignIn = async ({
   }
 
   await refreshSavedFriendContacts({ broadcast: true });
+  await startSupabaseFriendNetworkFeed();
+  await startSupabaseSharedTaskFeed();
   restartAccountSyncPolling();
   broadcastDataChange();
   broadcastAccountChange();
@@ -3044,6 +3183,8 @@ const signOutAccount = (): AccountStatus => {
   savedFriendContacts = [];
   hasLoadedSavedFriendContacts = false;
   restartAccountSyncPolling();
+  void startSupabaseSharedTaskFeed();
+  void startSupabaseFriendNetworkFeed();
   broadcastAccountChange();
   broadcastFriendNetworkChange();
   return getAccountStatus();
@@ -3052,11 +3193,9 @@ const signOutAccount = (): AccountStatus => {
 const syncAccountNow = async (): Promise<AccountStatus> => {
   await pullAccountPlannerState();
   await saveAccountPlannerState(getLiveState());
+  await startSupabaseSharedTaskFeed();
   return getAccountStatus();
 };
-
-const listFriendNetworkCodes = async (): Promise<FriendCodeAlias[]> =>
-  supabaseFriendNetworkService?.listFriendCodes() ?? [];
 
 const listSavedFriendContacts = async (): Promise<SavedFriendContact[]> => {
   if (!hasLoadedSavedFriendContacts && getStoredAccountSession()) {
@@ -3090,27 +3229,96 @@ const deleteFriendContact = async (contactId: string): Promise<SavedFriendContac
   return refreshSavedFriendContacts({ broadcast: true });
 };
 
+const listPublicTasksForFriend = async (
+  friendAccountId: string,
+): Promise<PublicSharedTask[]> => {
+  const session = getStoredAccountSession();
+  const normalizedFriendAccountId = normalizeOptionalText(friendAccountId);
+
+  if (!session || !normalizedFriendAccountId) {
+    return [];
+  }
+
+  return (
+    (await supabaseSharedTaskService?.listTasksVisibleToViewer(
+      normalizedFriendAccountId,
+      session.accountId,
+      session.passwordHash,
+    )) ?? []
+  );
+};
+
 const listPendingFriendNetworkEvents = async (): Promise<AppPopupEvent[]> =>
   supabaseFriendNetworkService?.listPendingEvents() ?? [];
 
 const listRecentFriendNetworkEvents = async (): Promise<AppPopupEvent[]> =>
   supabaseFriendNetworkService?.listRecentEvents() ?? [];
 
-const setFriendNetworkCode = async (code: string): Promise<FriendCodeAlias> => {
-  const friendCode = await requireSupabaseFriendNetworkService().setFriendCode(code);
-  broadcastFriendNetworkChange();
-  return friendCode;
+const sendFriendNetworkPopup = async (input: AppPopupDraft): Promise<void> => {
+  const normalizedRecipient = input.recipientUsername.trim().toLowerCase();
+  const savedContact = savedFriendContacts.find(
+    (contact) => contact.nickname.trim().toLowerCase() === normalizedRecipient,
+  );
+
+  await requireSupabaseFriendNetworkService().sendPopup({
+    ...input,
+    recipientUsername: savedContact?.friendUsername ?? input.recipientUsername,
+    recipientAccountId: input.recipientAccountId ?? savedContact?.friendAccountId,
+  });
 };
 
-const sendFriendNetworkPopup = async (input: AppPopupDraft): Promise<void> => {
-  if (
-    (input.kind === 'emergency_popup' || input.priority === 'emergency') &&
-    !verifyEmergencyPopupPassword(input.emergencyPassword)
-  ) {
-    throw new Error('Emergency popup password did not match.');
+const setAccountDisplayName = async (displayName: string): Promise<AccountStatus> => {
+  const session = getStoredAccountSession();
+
+  if (!session) {
+    throw new Error('Sign in before changing your display name.');
   }
 
-  await requireSupabaseFriendNetworkService().sendPopup(input);
+  const nextSession = await getAccountSyncService().setDisplayName(session, displayName);
+  storeAccountSession(nextSession);
+  broadcastAccountChange();
+  broadcastFriendNetworkChange();
+  return getAccountStatus();
+};
+
+const listEmergencyPasswords = async (): Promise<EmergencyPasswordGrant[]> => {
+  const session = getStoredAccountSession();
+  return session && supabaseAccountSyncService?.isConfigured
+    ? supabaseAccountSyncService.listEmergencyPasswords(session)
+    : [];
+};
+
+const listEmergencyPasswordsForMe = async (): Promise<EmergencyPasswordGrant[]> => {
+  const session = getStoredAccountSession();
+  return session && supabaseAccountSyncService?.isConfigured
+    ? supabaseAccountSyncService.listEmergencyPasswordsForMe(session)
+    : [];
+};
+
+const saveEmergencyPassword = async (
+  input: EmergencyPasswordGrantDraft,
+): Promise<EmergencyPasswordGrant[]> => {
+  const session = getStoredAccountSession();
+
+  if (!session) {
+    throw new Error('Sign in before setting friend emergency passwords.');
+  }
+
+  await getAccountSyncService().saveEmergencyPassword(session, input);
+  broadcastFriendNetworkChange();
+  return listEmergencyPasswords();
+};
+
+const deleteEmergencyPassword = async (grantId: string): Promise<EmergencyPasswordGrant[]> => {
+  const session = getStoredAccountSession();
+
+  if (!session) {
+    throw new Error('Sign in before removing friend emergency passwords.');
+  }
+
+  await getAccountSyncService().deleteEmergencyPassword(session, grantId);
+  broadcastFriendNetworkChange();
+  return listEmergencyPasswords();
 };
 
 const getPayloadString = (
@@ -3163,10 +3371,11 @@ const buildFriendTaskSubmissionDraft = (event: AppPopupEvent): TaskDraft => {
     title,
     notes:
       getPayloadString(payload, 'notes') ??
-      `Suggested by ${event.senderName ?? event.senderFriendCode ?? 'a friend'}.\n\n${event.message}`,
+      `Suggested by ${event.senderName ?? event.senderDisplayName ?? 'a friend'}.\n\n${event.message}`,
     dueAt: getPayloadString(payload, 'dueAt'),
     reminderAt: getPayloadString(payload, 'reminderAt'),
     priority: getPayloadPriority(payload, 'priority') ?? 'auto',
+    visibility: 'public',
   };
 };
 
@@ -3346,6 +3555,9 @@ ipcMain.handle('account:signIn', (_event, credentials: AccountCredentials) =>
 );
 ipcMain.handle('account:signOut', () => signOutAccount());
 ipcMain.handle('account:syncNow', () => syncAccountNow());
+ipcMain.handle('account:setDisplayName', (_event, displayName: string) =>
+  setAccountDisplayName(displayName),
+);
 
 ipcMain.handle('submissions:list', () => listTaskSubmissions());
 ipcMain.handle('submissions:accept', (_event, submissionId: string) =>
@@ -3372,16 +3584,26 @@ ipcMain.handle('friendNetwork:setDndMode', (_event, mode: AppDndMode) => {
   broadcastFriendNetworkChange();
   return getFriendNetworkStatus();
 });
-ipcMain.handle('friendNetwork:listFriendCodes', () => listFriendNetworkCodes());
-ipcMain.handle('friendNetwork:setFriendCode', (_event, code: string) =>
-  setFriendNetworkCode(code),
-);
 ipcMain.handle('friendNetwork:listContacts', () => listSavedFriendContacts());
 ipcMain.handle('friendNetwork:saveContact', (_event, input: SavedFriendContactDraft) =>
   saveFriendContact(input),
 );
 ipcMain.handle('friendNetwork:deleteContact', (_event, contactId: string) =>
   deleteFriendContact(contactId),
+);
+ipcMain.handle('friendNetwork:listPublicTasksForFriend', (_event, friendAccountId: string) =>
+  listPublicTasksForFriend(friendAccountId),
+);
+ipcMain.handle('friendNetwork:listEmergencyPasswords', () => listEmergencyPasswords());
+ipcMain.handle('friendNetwork:listEmergencyPasswordsForMe', () =>
+  listEmergencyPasswordsForMe(),
+);
+ipcMain.handle(
+  'friendNetwork:saveEmergencyPassword',
+  (_event, input: EmergencyPasswordGrantDraft) => saveEmergencyPassword(input),
+);
+ipcMain.handle('friendNetwork:deleteEmergencyPassword', (_event, grantId: string) =>
+  deleteEmergencyPassword(grantId),
 );
 ipcMain.handle('friendNetwork:listPendingEvents', () => listPendingFriendNetworkEvents());
 ipcMain.handle('friendNetwork:listRecentEvents', () => listRecentFriendNetworkEvents());
@@ -3419,6 +3641,10 @@ ipcMain.handle('app:closeCurrentWindow', (event, reason?: PopupCloseReason) => {
     return;
   }
 
+  if (dismissMegaPopupWindow(currentWindow, reason)) {
+    return;
+  }
+
   currentWindow.close();
 });
 ipcMain.handle('quickAdd:open', () => {
@@ -3448,6 +3674,7 @@ app.on('will-quit', () => {
   });
   reminderPopupWindows = [];
   reminderPopupQueue = [];
+  megaPopupQueue = [];
   closeMegaPopupWindow();
 
   if (supabaseMessageServiceStop) {
@@ -3495,6 +3722,7 @@ app.on('window-all-closed', () => {
 });
 
 void app.whenReady().then(async () => {
+  startUserBuildAutoUpdates();
   mainWindow = createMainWindow();
   createTray();
   registerShortcuts();

@@ -1,10 +1,9 @@
-import dotenv from 'dotenv';
 import { createClient } from '@supabase/supabase-js';
-
-dotenv.config();
-
-const SUPABASE_URL_ENV = 'SUPABASE_URL';
-const SUPABASE_PUBLISHABLE_KEY_ENV = 'SUPABASE_PUBLISHABLE_KEY';
+import {
+  getMissingSupabaseConfigKeys,
+  getSupabasePublishableKey,
+  getSupabaseUrl,
+} from './buildConfig';
 const SUPABASE_PRESENCE_TABLE_ENV = 'SUPABASE_PRESENCE_TABLE';
 const DEFAULT_SUPABASE_PRESENCE_TABLE = 'app_presence';
 
@@ -23,11 +22,6 @@ export type SupabasePresenceService = {
   stop: () => Promise<void>;
 };
 
-const getMissingSupabaseEnvKeys = (): string[] =>
-  [SUPABASE_URL_ENV, SUPABASE_PUBLISHABLE_KEY_ENV].filter(
-    (key) => !process.env[key]?.trim(),
-  );
-
 const getPresenceTableName = (): string =>
   process.env[SUPABASE_PRESENCE_TABLE_ENV]?.trim() || DEFAULT_SUPABASE_PRESENCE_TABLE;
 
@@ -37,7 +31,7 @@ export const createSupabasePresenceService = ({
   heartbeatIntervalMs,
   onError,
 }: SupabasePresenceServiceOptions): SupabasePresenceService => {
-  const missingEnvKeys = getMissingSupabaseEnvKeys();
+  const missingEnvKeys = getMissingSupabaseConfigKeys();
 
   if (missingEnvKeys.length > 0) {
     return {
@@ -50,8 +44,8 @@ export const createSupabasePresenceService = ({
   }
 
   const supabase = createClient(
-    process.env[SUPABASE_URL_ENV] as string,
-    process.env[SUPABASE_PUBLISHABLE_KEY_ENV] as string,
+    getSupabaseUrl() as string,
+    getSupabasePublishableKey() as string,
     {
       auth: {
         persistSession: false,
