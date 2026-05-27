@@ -1,7 +1,7 @@
 {
   "name": "to_do_list",
   "productName": "To Do List",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "description": "Desktop to-do list with quick add and reminder notifications.",
   "main": ".webpack/main",
   "private": true,

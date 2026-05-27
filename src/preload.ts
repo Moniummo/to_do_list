@@ -4,6 +4,8 @@ import type {
   AccountStatus,
   AppDndMode,
   AppInfo,
+  AppStartupSettings,
+  AppUpdateCheckResult,
   AppPopupDraft,
   AppPopupEvent,
   AppSelection,
@@ -245,16 +247,6 @@ const api: TodoAppApi = {
       ipcRenderer.invoke('friendNetwork:acceptEvent', id) as Promise<AppPopupEvent[]>,
     denyEvent: (id: string) =>
       ipcRenderer.invoke('friendNetwork:denyEvent', id) as Promise<AppPopupEvent[]>,
-    setRecentPopupPassword: (password: string) =>
-      ipcRenderer.invoke(
-        'friendNetwork:setRecentPopupPassword',
-        password,
-      ) as Promise<FriendNetworkStatus>,
-    verifyRecentPopupPassword: (password: string) =>
-      ipcRenderer.invoke(
-        'friendNetwork:verifyRecentPopupPassword',
-        password,
-      ) as Promise<boolean>,
     onChanged: (listener: () => void) => {
       friendNetworkChangeListeners.add(listener);
 
@@ -265,6 +257,12 @@ const api: TodoAppApi = {
   },
   app: {
     info: () => ipcRenderer.invoke('app:info') as Promise<AppInfo>,
+    getStartupSettings: () =>
+      ipcRenderer.invoke('app:getStartupSettings') as Promise<AppStartupSettings>,
+    setStartupEnabled: (enabled: boolean) =>
+      ipcRenderer.invoke('app:setStartupEnabled', enabled) as Promise<AppStartupSettings>,
+    checkForUpdates: () =>
+      ipcRenderer.invoke('app:checkForUpdates') as Promise<AppUpdateCheckResult>,
     show: () => ipcRenderer.invoke('app:show') as Promise<void>,
     showSelection: (selection: AppSelection) =>
       ipcRenderer.invoke('app:showSelection', selection) as Promise<void>,

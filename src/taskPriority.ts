@@ -56,7 +56,7 @@ export const getTaskPriorityDetails = (
 
   if (!task.dueAt) {
     return {
-      label: 'Passive',
+      label: 'Low',
       rank: 7,
       tone: 'muted',
     };
@@ -68,39 +68,31 @@ export const getTaskPriorityDetails = (
 
   if (compareLocalDateStrings(dueDate, today) < 0) {
     return {
-      label: 'Overdue',
+      label: 'High',
       rank: 0,
       tone: 'danger',
     };
   }
 
-  if (dayDifference === 0) {
+  if (dayDifference <= 1) {
     return {
-      label: 'Today',
+      label: 'High',
       rank: 1,
       tone: 'danger',
     };
   }
 
-  if (dayDifference === 1) {
+  if (dayDifference <= 7) {
     return {
-      label: 'Tomorrow',
+      label: 'Medium',
       rank: 2,
       tone: 'accent',
     };
   }
 
-  if (dayDifference <= 7) {
-    return {
-      label: `${dayDifference} days`,
-      rank: dayDifference + 1,
-      tone: 'muted',
-    };
-  }
-
   return {
-    label: 'Later',
-    rank: 10,
+    label: 'Low',
+    rank: 8,
     tone: 'muted',
   };
 };

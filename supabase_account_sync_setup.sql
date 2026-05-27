@@ -225,6 +225,34 @@ begin
 end;
 $$;
 
+alter table public.shared_tasks add column if not exists completed_at timestamptz;
+alter table public.shared_tasks drop constraint if exists shared_tasks_status_check;
+alter table public.shared_tasks add constraint shared_tasks_status_check
+check (status in ('pending', 'completed'));
+alter table public.shared_tasks replica identity full;
+delete from public.shared_tasks
+where owner_account_id is null
+   or task_id is null;
+delete from public.shared_tasks tasks
+using (
+  select
+    ctid,
+    row_number() over (
+      partition by owner_account_id, task_id
+      order by updated_at desc nulls last, completed_at desc nulls last
+    ) as duplicate_rank
+  from public.shared_tasks
+) duplicates
+where tasks.ctid = duplicates.ctid
+  and duplicates.duplicate_rank > 1;
+alter table public.shared_tasks alter column owner_account_id set not null;
+alter table public.shared_tasks alter column task_id set not null;
+alter table public.shared_tasks drop constraint if exists shared_tasks_pkey;
+drop index if exists shared_tasks_owner_task_id_key;
+alter table public.shared_tasks add constraint shared_tasks_pkey
+primary key (owner_account_id, task_id);
+alter table public.shared_tasks replica identity full;
+
 drop function if exists public.list_shared_tasks_for_viewer(uuid, text, uuid);
 create or replace function public.list_shared_tasks_for_viewer(
   p_viewer_account_id uuid, p_password_hash text, p_owner_account_id uuid
@@ -238,6 +266,7 @@ returns table (
   status text,
   due_at timestamptz,
   reminder_at timestamptz,
+  completed_at timestamptz,
   scheduled_date date,
   priority text,
   rule_summary text,
@@ -247,9 +276,19 @@ returns table (
 language plpgsql security definer set search_path = public as $$
 declare
   v_viewer public.app_accounts;
+  v_owner public.app_accounts;
   v_permission text := 'none';
 begin
   v_viewer := public.require_app_account(p_viewer_account_id, p_password_hash);
+
+  select * into v_owner
+  from public.app_accounts
+  where id = p_owner_account_id
+  limit 1;
+
+  if v_owner.id is null then
+    return;
+  end if;
 
   if v_viewer.id = p_owner_account_id then
     v_permission := 'all';
@@ -273,6 +312,7 @@ begin
     tasks.status::text,
     tasks.due_at::timestamptz,
     tasks.reminder_at::timestamptz,
+    tasks.completed_at::timestamptz,
     tasks.scheduled_date::date,
     tasks.priority::text,
     tasks.rule_summary::text,
@@ -280,12 +320,54 @@ begin
     tasks.updated_at::timestamptz
   from public.shared_tasks tasks
   where tasks.owner_account_id = p_owner_account_id
-    and tasks.status = 'pending'
+    and tasks.status in ('pending', 'completed')
     and (
       v_permission = 'all'
       or (v_permission = 'public' and tasks.visibility = 'public')
     )
-  order by tasks.due_at asc nulls last, tasks.updated_at desc
+  order by
+    case when tasks.status = 'pending' then 0 else 1 end,
+    tasks.due_at asc nulls last,
+    tasks.completed_at desc nulls last,
+    tasks.updated_at desc
+  limit 100;
+
+  if found then
+    return;
+  end if;
+
+  return query
+  select
+    v_owner.id::uuid,
+    ('task:' || (task_item->>'id'))::text,
+    'task'::text,
+    (task_item->>'id')::text,
+    (task_item->>'title')::text,
+    coalesce(nullif(task_item->>'status', ''), 'pending')::text,
+    nullif(task_item->>'dueAt', '')::timestamptz,
+    nullif(task_item->>'reminderAt', '')::timestamptz,
+    nullif(task_item->>'completedAt', '')::timestamptz,
+    null::date,
+    nullif(task_item->>'priority', '')::text,
+    null::text,
+    coalesce(nullif(task_item->>'visibility', ''), 'public')::text,
+    v_owner.planner_state_updated_at::timestamptz
+  from jsonb_array_elements(coalesce(v_owner.planner_state->'oneOffTasks', '[]'::jsonb)) task_item
+  where nullif(task_item->>'id', '') is not null
+    and nullif(task_item->>'title', '') is not null
+    and coalesce(nullif(task_item->>'status', ''), 'pending') in ('pending', 'completed')
+    and (
+      v_permission = 'all'
+      or (
+        v_permission = 'public'
+        and coalesce(nullif(task_item->>'visibility', ''), 'public') = 'public'
+      )
+    )
+  order by
+    case when coalesce(nullif(task_item->>'status', ''), 'pending') = 'pending' then 0 else 1 end,
+    nullif(task_item->>'dueAt', '')::timestamptz asc nulls last,
+    nullif(task_item->>'completedAt', '')::timestamptz desc nulls last,
+    v_owner.planner_state_updated_at desc
   limit 100;
 end;
 $$;

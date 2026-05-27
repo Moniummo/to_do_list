@@ -21,6 +21,7 @@ import {
 import type {
   AccountStatus,
   AppInfo,
+  AppStartupSettings,
   AppDndMode,
   AppPopupEvent,
   EmergencyPasswordGrant,
@@ -122,9 +123,12 @@ type MainView =
   | 'routines'
   | 'history'
   | 'submissions'
-  | 'network';
+  | 'network'
+  | 'settings';
 
-type FriendNetworkPanel = 'friends' | 'send' | 'review' | 'settings';
+type FriendNetworkPanel = 'friends' | 'send' | 'review';
+
+type PlannerPanel = 'day' | 'week';
 
 type TimeBlockFormValues = {
   title: string;
@@ -140,6 +144,7 @@ type FriendPopupFormValues = {
   recipientUsername: string;
   recipientAccountId: string;
   senderName: string;
+  relatedTaskId: string;
   message: string;
   isEmergency: boolean;
   emergencyPassword: string;
@@ -164,6 +169,13 @@ type FriendTaskEditSuggestionFormValues = {
   suggestedReminderDate: string;
   suggestedReminderTime: string;
   suggestedPriority: TaskPriority;
+  suggestedRoutineInterval: string;
+  suggestedRoutineUnit: RoutineUnit;
+  suggestedRoutineWeekdays: RoutineWeekday[];
+  suggestedRoutineStartDate: string;
+  suggestedRoutineEndDate: string;
+  suggestedRoutineDueTime: string;
+  suggestedRoutineReminderTime: string;
 };
 
 type AccountFormValues = {
@@ -438,6 +450,10 @@ const dateTimeFormatter = new Intl.DateTimeFormat(undefined, {
   hour: 'numeric',
   minute: '2-digit',
 });
+const timeFormatter = new Intl.DateTimeFormat(undefined, {
+  hour: 'numeric',
+  minute: '2-digit',
+});
 const dateFormatter = new Intl.DateTimeFormat(undefined, {
   weekday: 'short',
   month: 'short',
@@ -624,6 +640,15 @@ function FieldError({ message }: FieldErrorProps) {
   return message ? <p className="field-error">{message}</p> : null;
 }
 
+const submitFormOnEnter = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+  if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing) {
+    return;
+  }
+
+  event.preventDefault();
+  event.currentTarget.form?.requestSubmit();
+};
+
 type FriendRecipientPickerProps = {
   id: string;
   label: string;
@@ -758,6 +783,13 @@ const createEmptyFriendTaskEditSuggestionForm =
     suggestedReminderDate: '',
     suggestedReminderTime: '',
     suggestedPriority: 'auto',
+    suggestedRoutineInterval: '1',
+    suggestedRoutineUnit: 'day',
+    suggestedRoutineWeekdays: [getWeekdayForDateString(toLocalDateString(new Date()))],
+    suggestedRoutineStartDate: toLocalDateString(new Date()),
+    suggestedRoutineEndDate: '',
+    suggestedRoutineDueTime: '',
+    suggestedRoutineReminderTime: '',
   });
 
 const toLocalDateTimeInputValue = (value?: string): string => {
@@ -842,6 +874,27 @@ const formatDateTime = (value?: string): string | null => {
 const formatDateOnly = (value: string): string => {
   const date = new Date(`${value}T12:00:00`);
   return dateFormatter.format(date);
+};
+
+const formatTimeOnly = (value: string): string => {
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return '';
+  }
+
+  return timeFormatter.format(date);
+};
+
+const formatMinutes = (minutes: number): string => {
+  if (minutes < 60) {
+    return `${Math.round(minutes)}m`;
+  }
+
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = Math.round(minutes % 60);
+
+  return remainingMinutes ? `${hours}h ${remainingMinutes}m` : `${hours}h`;
 };
 
 const createTaskFormValues = (task?: Task): OneOffFormValues => {
@@ -950,6 +1003,49 @@ const buildTimeBlockDraft = (values: TimeBlockFormValues): TimeBlockDraft => {
   };
 };
 
+const createTimeBlockFormValues = (block: TimeBlock): TimeBlockFormValues => {
+  const startValues = splitDateTimeValue(block.startAt);
+  const endValues = splitDateTimeValue(block.endAt);
+
+  return {
+    title: block.title,
+    taskId: block.taskId ?? '',
+    date: startValues.date || toLocalDateString(new Date()),
+    startTime: startValues.time || '09:00',
+    endTime: endValues.time || '10:00',
+    notes: block.notes ?? '',
+    enableDnd: Boolean(block.enableDnd),
+  };
+};
+
+const getTimeBlockMinutes = (block: TimeBlock): number =>
+  Math.max(0, (new Date(block.endAt).getTime() - new Date(block.startAt).getTime()) / 60_000);
+
+const CALENDAR_HOUR_HEIGHT = 64;
+
+const getMinutesSinceMidnight = (value: string): number => {
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return 0;
+  }
+
+  return date.getHours() * 60 + date.getMinutes();
+};
+
+const getCalendarBlockStyle = (block: TimeBlock): React.CSSProperties => {
+  const startMinutes = getMinutesSinceMidnight(block.startAt);
+  const duration = Math.max(15, getTimeBlockMinutes(block));
+
+  return {
+    top: `${(startMinutes / 60) * CALENDAR_HOUR_HEIGHT}px`,
+    height: `${Math.max(32, (duration / 60) * CALENDAR_HOUR_HEIGHT)}px`,
+  };
+};
+
+const formatHourLabel = (hour: number): string =>
+  timeFormatter.format(new Date(2026, 0, 1, hour, 0));
+
 const buildRoutineDraft = (values: RoutineFormValues): RoutineDraft => ({
   title: values.title,
   notes: values.notes,
@@ -963,6 +1059,21 @@ const buildRoutineDraft = (values: RoutineFormValues): RoutineDraft => ({
     dueTime: values.dueTime || undefined,
     reminderTime: values.reminderTime || undefined,
   },
+});
+
+const buildSuggestedRoutineRule = (
+  values: FriendTaskEditSuggestionFormValues,
+): RoutineDraft['rule'] => ({
+  interval: Number(values.suggestedRoutineInterval),
+  unit: values.suggestedRoutineUnit,
+  weekdays:
+    values.suggestedRoutineUnit === 'week'
+      ? values.suggestedRoutineWeekdays
+      : undefined,
+  startDate: values.suggestedRoutineStartDate,
+  endDate: values.suggestedRoutineEndDate || undefined,
+  dueTime: values.suggestedRoutineDueTime || undefined,
+  reminderTime: values.suggestedRoutineReminderTime || undefined,
 });
 
 const shiftMonthKey = (monthKey: string, delta: number): string =>
@@ -1029,53 +1140,6 @@ const getCompletedLocalDate = (value?: string): string | null => {
 
 const getCompletedTaskDate = (task: Task): string | null => {
   return getCompletedLocalDate(task.completedAt);
-};
-
-const isTaskForToday = (task: Task): boolean => {
-  if (task.status !== 'pending') {
-    return false;
-  }
-
-  const today = toLocalDateString(new Date());
-  const anchorDate = task.dueAt ? toLocalDateString(new Date(task.dueAt)) : today;
-  return compareLocalDateStrings(anchorDate, today) <= 0;
-};
-
-const isRoutineForToday = (item: RoutineListItem): boolean => {
-  const currentOccurrence = item.currentOccurrence;
-
-  if (!currentOccurrence || currentOccurrence.status !== 'pending') {
-    return false;
-  }
-
-  return compareLocalDateStrings(
-    currentOccurrence.scheduledDate,
-    toLocalDateString(new Date()),
-  ) <= 0;
-};
-
-const isTaskForLater = (task: Task): boolean => {
-  if (task.status !== 'pending' || !task.dueAt) {
-    return false;
-  }
-
-  return compareLocalDateStrings(
-    toLocalDateString(new Date(task.dueAt)),
-    toLocalDateString(new Date()),
-  ) > 0;
-};
-
-const isRoutineForLater = (item: RoutineListItem): boolean => {
-  const currentOccurrence = item.currentOccurrence;
-
-  if (!currentOccurrence || currentOccurrence.status !== 'pending') {
-    return false;
-  }
-
-  return compareLocalDateStrings(
-    currentOccurrence.scheduledDate,
-    toLocalDateString(new Date()),
-  ) > 0;
 };
 
 const getHashRoute = (): string => {
@@ -2351,6 +2415,7 @@ function HistoryDayModal({
 
 function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
   const [appInfo, setAppInfo] = useState<AppInfo | null>(null);
+  const [startupSettings, setStartupSettings] = useState<AppStartupSettings | null>(null);
   const [accountStatus, setAccountStatus] = useState<AccountStatus | null>(null);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [timeBlocks, setTimeBlocks] = useState<TimeBlock[]>([]);
@@ -2395,6 +2460,7 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
     recipientUsername: '',
     recipientAccountId: '',
     senderName: '',
+    relatedTaskId: '',
     message: '',
     isEmergency: false,
     emergencyPassword: '',
@@ -2405,13 +2471,15 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
     useState<FriendTaskEditSuggestionFormValues>(
       createEmptyFriendTaskEditSuggestionForm(),
     );
-  const [recentPopupPasswordDraft, setRecentPopupPasswordDraft] = useState('');
-  const [newRecentPopupPasswordDraft, setNewRecentPopupPasswordDraft] = useState('');
-  const [isRecentPopupsUnlocked, setIsRecentPopupsUnlocked] = useState(false);
+  const [isRecentPopupsVisible, setIsRecentPopupsVisible] = useState(false);
   const [activeView, setActiveView] = useState<MainView>('today');
   const [activeNetworkPanel, setActiveNetworkPanel] =
     useState<FriendNetworkPanel>('friends');
+  const [activePlannerPanel, setActivePlannerPanel] = useState<PlannerPanel>('day');
   const [editingRoutineId, setEditingRoutineId] = useState<string | null>(null);
+  const [editingTimeBlockId, setEditingTimeBlockId] = useState<string | null>(null);
+  const [editingTimeBlockForm, setEditingTimeBlockForm] =
+    useState<TimeBlockFormValues | null>(null);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [selectedRoutineId, setSelectedRoutineId] = useState<string | null>(null);
   const [historyRoutineId, setHistoryRoutineId] = useState<string | null>(null);
@@ -2420,7 +2488,10 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
   const [historyDayPayload, setHistoryDayPayload] = useState<HistoryDayPayload | null>(null);
   const [showCompletedTasks, setShowCompletedTasks] = useState(false);
   const [taskDetailsOpen, setTaskDetailsOpen] = useState(false);
+  const [routineEditorOpen, setRoutineEditorOpen] = useState(false);
   const [routineDetailsOpen, setRoutineDetailsOpen] = useState(true);
+  const [isSettingsSyncing, setIsSettingsSyncing] = useState(false);
+  const [settingsSyncStatus, setSettingsSyncStatus] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isHistoryLoading, setIsHistoryLoading] = useState(false);
   const [isHistoryDayLoading, setIsHistoryDayLoading] = useState(false);
@@ -2429,6 +2500,8 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
   const [friendFormErrors, setFriendFormErrors] = useState<Record<string, string>>({});
   const [friendPublicTasks, setFriendPublicTasks] = useState<PublicSharedTask[]>([]);
   const [isLoadingFriendPublicTasks, setIsLoadingFriendPublicTasks] = useState(false);
+  const [friendPopupTasks, setFriendPopupTasks] = useState<PublicSharedTask[]>([]);
+  const [isLoadingFriendPopupTasks, setIsLoadingFriendPopupTasks] = useState(false);
   const [visibleEmergencyPasswordIds, setVisibleEmergencyPasswordIds] = useState<
     Record<string, boolean>
   >({});
@@ -2439,9 +2512,10 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
   const routineTitleInputRef = useRef<HTMLInputElement | null>(null);
 
   const syncDashboard = async (): Promise<RoutineListItem[]> => {
-    const [nextAppInfo, nextAccountStatus] = await Promise.all([
+    const [nextAppInfo, nextAccountStatus, nextStartupSettings] = await Promise.all([
       window.todoApp.app.info(),
       window.todoApp.account.status(),
+      window.todoApp.app.getStartupSettings(),
     ]);
 
     const [
@@ -2473,6 +2547,7 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
     ]);
 
     setAppInfo(nextAppInfo);
+    setStartupSettings(nextStartupSettings);
     setAccountStatus(nextAccountStatus);
     setTasks(nextTasks);
     setTimeBlocks(nextTimeBlocks);
@@ -2817,17 +2892,29 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
   const plannerBlocks = timeBlocks.filter(
     (block) => toLocalDateString(new Date(block.startAt)) === plannerDate,
   );
+  const sortedPlannerBlocks = plannerBlocks
+    .slice()
+    .sort((left, right) => left.startAt.localeCompare(right.startAt));
   const timeBlockedTaskIds = new Set(timeBlocks.map((block) => block.taskId).filter(Boolean));
   const unplannedTasks = pendingTasks.filter((task) => !timeBlockedTaskIds.has(task.id));
-  const dueTasksForPlannerDate = pendingTasks.filter(
-    (task) => task.dueAt && toLocalDateString(new Date(task.dueAt)) === plannerDate,
+  const plannableRoutines = routines.filter(
+    (item) => item.currentOccurrence?.status === 'pending',
   );
+  const plannerInboxCount = unplannedTasks.length + plannableRoutines.length;
+  const calendarHours = Array.from({ length: 24 }, (_value, hour) => hour);
+  const selectedFriendEditTarget = friendPublicTasks.find(
+    (task) => task.id === friendTaskEditSuggestionForm.publicTaskId,
+  );
+  const isSuggestingRoutineEdit = selectedFriendEditTarget?.kind === 'routine';
   const plannerMinutes = plannerBlocks.reduce(
     (minutes, block) =>
       minutes +
       Math.max(0, new Date(block.endAt).getTime() - new Date(block.startAt).getTime()) / 60_000,
     0,
   );
+  const plannerCompletionCount = plannerBlocks.filter(
+    (block) => block.status === 'completed',
+  ).length;
 
   const clearFriendFormErrors = (...keys: string[]) => {
     setFriendFormErrors((current) => {
@@ -2856,20 +2943,28 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
   const getMaskedPassword = (password: string): string =>
     password.length ? '•'.repeat(Math.min(Math.max(password.length, 6), 16)) : '••••••';
 
+  const loadLivePublicTasks = async (
+    friendAccountId: string,
+  ): Promise<PublicSharedTask[]> => {
+    const publicTasks = await window.todoApp.friendNetwork.listPublicTasksForFriend(
+      friendAccountId,
+    );
+
+    return publicTasks.filter((task) => task.status === 'pending');
+  };
+
   const loadPublicTasksForContact = async (contact: SavedFriendContact) => {
     setIsLoadingFriendPublicTasks(true);
     clearFriendFormErrors('editRecipient', 'editTask');
 
     try {
-      const publicTasks = await window.todoApp.friendNetwork.listPublicTasksForFriend(
-        contact.friendAccountId,
-      );
+      const publicTasks = await loadLivePublicTasks(contact.friendAccountId);
       setFriendPublicTasks(publicTasks);
 
       if (publicTasks.length === 0) {
         setFriendFormError(
           'editTask',
-          'That friend has no publicly viewable active tasks right now.',
+          'That friend has no publicly viewable active tasks or routines right now.',
         );
       }
     } catch (taskLoadError) {
@@ -2877,6 +2972,21 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
       setFriendFormError('editTask', getErrorMessage(taskLoadError));
     } finally {
       setIsLoadingFriendPublicTasks(false);
+    }
+  };
+
+  const loadPopupTasksForContact = async (contact: SavedFriendContact) => {
+    setIsLoadingFriendPopupTasks(true);
+    clearFriendFormErrors('popupRecipient', 'popupTask');
+
+    try {
+      const publicTasks = await loadLivePublicTasks(contact.friendAccountId);
+      setFriendPopupTasks(publicTasks);
+    } catch (taskLoadError) {
+      setFriendPopupTasks([]);
+      setFriendFormError('popupTask', getErrorMessage(taskLoadError));
+    } finally {
+      setIsLoadingFriendPopupTasks(false);
     }
   };
 
@@ -2925,6 +3035,7 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
 
       setRoutineFormValues(createEmptyRoutineForm());
       setEditingRoutineId(null);
+      setRoutineEditorOpen(false);
       await refreshAll();
     } catch (submitError) {
       setError(getErrorMessage(submitError));
@@ -2944,9 +3055,8 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
     setIsSubmitting(true);
 
     try {
-      const nextBlocks = await window.todoApp.timeBlocks.create(
-        buildTimeBlockDraft(timeBlockForm),
-      );
+      const blockDraft = buildTimeBlockDraft(timeBlockForm);
+      const nextBlocks = await window.todoApp.timeBlocks.create(blockDraft);
       setTimeBlocks(nextBlocks);
       setTimeBlockForm(createEmptyTimeBlockForm(plannerDate));
     } catch (submitError) {
@@ -2956,33 +3066,109 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
     }
   };
 
-  const planTaskForDate = async (task: Task, date = plannerDate) => {
+  const handleInlineTimeBlockSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+
+    if (!editingTimeBlockId || !editingTimeBlockForm) {
+      return;
+    }
+
+    setError(null);
+    setIsSubmitting(true);
+
+    try {
+      const blockDraft = buildTimeBlockDraft(editingTimeBlockForm);
+      const nextBlocks = await window.todoApp.timeBlocks.update({
+        id: editingTimeBlockId,
+        title: blockDraft.title,
+        startAt: blockDraft.startAt,
+        endAt: blockDraft.endAt,
+        taskId: blockDraft.taskId ?? null,
+        notes: blockDraft.notes ?? null,
+        enableDnd: blockDraft.enableDnd,
+        status: 'planned',
+      });
+      setTimeBlocks(nextBlocks);
+      setEditingTimeBlockId(null);
+      setEditingTimeBlockForm(null);
+    } catch (submitError) {
+      setError(getErrorMessage(submitError));
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const createBlockFormForDrop = (
+    date: string,
+    startHour?: number,
+  ): TimeBlockFormValues => {
+    const nextForm = createEmptyTimeBlockForm(date);
+
+    if (startHour === undefined) {
+      return nextForm;
+    }
+
+    const safeHour = Math.min(Math.max(startHour, 0), 23);
+    const endHour = Math.min(safeHour + 1, 24);
+
+    return {
+      ...nextForm,
+      startTime: `${String(safeHour).padStart(2, '0')}:00`,
+      endTime: endHour === 24 ? '23:59' : `${String(endHour).padStart(2, '0')}:00`,
+    };
+  };
+
+  const planTaskForDate = async (task: Task, date = plannerDate, startHour?: number) => {
     const nextBlocks = await window.todoApp.timeBlocks.create(
       buildTimeBlockDraft({
-        ...createEmptyTimeBlockForm(date),
+        ...createBlockFormForDrop(date, startHour),
         title: task.title,
         taskId: task.id,
+        notes: task.notes ?? '',
       }),
     );
     setTimeBlocks(nextBlocks);
   };
 
-  const planDroppedTask = (taskId: string, date = plannerDate) => {
-    const task = pendingTasks.find((candidate) => candidate.id === taskId);
-
-    if (task) {
-      void planTaskForDate(task, date);
-    }
+  const planRoutineForDate = async (
+    item: RoutineListItem,
+    date = plannerDate,
+    startHour?: number,
+  ) => {
+    const nextBlocks = await window.todoApp.timeBlocks.create(
+      buildTimeBlockDraft({
+        ...createBlockFormForDrop(date, startHour),
+        title: item.template.title,
+        notes: item.template.notes ?? '',
+      }),
+    );
+    setTimeBlocks(nextBlocks);
   };
 
-  const handleMoveTimeBlock = async (block: TimeBlock, minutes: number) => {
-    const nextBlocks = await window.todoApp.timeBlocks.update({
-      id: block.id,
-      startAt: new Date(new Date(block.startAt).getTime() + minutes * 60_000).toISOString(),
-      endAt: new Date(new Date(block.endAt).getTime() + minutes * 60_000).toISOString(),
-      status: 'planned',
-    });
-    setTimeBlocks(nextBlocks);
+  const planDroppedItem = (payload: string, date = plannerDate, startHour?: number) => {
+    if (!payload) {
+      return;
+    }
+
+    const [kind, id] = payload.split(':');
+
+    if (kind === 'task') {
+      const task = pendingTasks.find((candidate) => candidate.id === id);
+
+      if (task) {
+        void planTaskForDate(task, date, startHour);
+      }
+
+      return;
+    }
+
+    if (kind === 'routine') {
+      const routine = routines.find((candidate) => candidate.template.id === id);
+
+      if (routine) {
+        void planRoutineForDate(routine, date, startHour);
+      }
+    }
   };
 
   const handleTimeBlockStatus = async (
@@ -2999,6 +3185,19 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
   const handleDeleteTimeBlock = async (blockId: string) => {
     const nextBlocks = await window.todoApp.timeBlocks.delete(blockId);
     setTimeBlocks(nextBlocks);
+    setEditingTimeBlockId((current) => (current === blockId ? null : current));
+    setEditingTimeBlockForm((current) => (editingTimeBlockId === blockId ? null : current));
+  };
+
+  const handleEditTimeBlock = (block: TimeBlock) => {
+    setActivePlannerPanel('day');
+    setEditingTimeBlockId(block.id);
+    setEditingTimeBlockForm(createTimeBlockFormValues(block));
+  };
+
+  const handleCancelTimeBlockEdit = () => {
+    setEditingTimeBlockId(null);
+    setEditingTimeBlockForm(null);
   };
 
   const handleCompleteTask = async (taskId: string) => {
@@ -3194,11 +3393,12 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
   };
 
   const applyContactToPopupForm = (contact: SavedFriendContact) => {
-    clearFriendFormErrors('popupRecipient');
+    void loadPopupTasksForContact(contact);
     setFriendPopupForm((current) => ({
       ...current,
       recipientUsername: getFriendContactLabel(contact),
       recipientAccountId: contact.friendAccountId,
+      relatedTaskId: '',
     }));
   };
 
@@ -3247,18 +3447,57 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
     }
 
     try {
+      const livePopupTasks = friendPopupForm.recipientAccountId
+        ? await loadLivePublicTasks(friendPopupForm.recipientAccountId)
+        : [];
+      setFriendPopupTasks(livePopupTasks);
+
+      const linkedTask = livePopupTasks.find(
+        (task) => task.id === friendPopupForm.relatedTaskId,
+      );
+
+      if (friendPopupForm.relatedTaskId && !linkedTask) {
+        setFriendFormError(
+          'popupTask',
+          'That task is no longer live. Choose a current task from this friend.',
+        );
+        return;
+      }
+
       await window.todoApp.friendNetwork.sendPopup({
         recipientUsername: friendPopupForm.recipientUsername,
         recipientAccountId: friendPopupForm.recipientAccountId || undefined,
         senderName: friendPopupForm.senderName,
-        kind: friendPopupForm.isEmergency ? 'emergency_popup' : 'general_popup',
+        kind: friendPopupForm.isEmergency
+          ? 'emergency_popup'
+          : linkedTask
+            ? 'task_popup'
+            : 'general_popup',
         priority: friendPopupForm.isEmergency ? 'emergency' : 'normal',
-        title: friendPopupForm.isEmergency ? 'Emergency Popup' : undefined,
+        title: friendPopupForm.isEmergency
+          ? 'Emergency Popup'
+          : linkedTask
+            ? linkedTask.title
+            : undefined,
         message: friendPopupForm.message,
+        relatedTaskId: linkedTask?.sourceId,
+        relatedTaskTitle: linkedTask?.title,
         emergencyPassword: friendPopupForm.emergencyPassword,
+        payload: linkedTask
+          ? {
+              taskId: linkedTask.sourceId,
+              taskKind: linkedTask.kind,
+              sharedTaskId: linkedTask.id,
+              taskTitle: linkedTask.title,
+              dueAt: linkedTask.dueAt,
+              reminderAt: linkedTask.reminderAt,
+              priority: linkedTask.priority,
+            }
+          : {},
       });
       setFriendPopupForm((current) => ({
         ...current,
+        relatedTaskId: '',
         message: '',
         isEmergency: false,
         emergencyPassword: '',
@@ -3338,6 +3577,8 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
 
     try {
       const taskDraft = buildTaskDraft(friendTaskSuggestionForm);
+      const taskSuggestionMessage =
+        taskDraft.notes?.trim() || `Suggested new task: ${taskDraft.title}`;
 
       await window.todoApp.friendNetwork.sendPopup({
         recipientUsername: friendTaskSuggestionForm.recipientUsername,
@@ -3346,9 +3587,7 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
         kind: 'task_submission',
         priority: 'normal',
         title: taskDraft.title,
-        message:
-          taskDraft.notes ??
-          `Suggested new task: ${taskDraft.title}`,
+        message: taskSuggestionMessage,
         payload: {
           title: taskDraft.title,
           notes: taskDraft.notes,
@@ -3375,9 +3614,9 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
       nextErrors.editRecipient = 'Choose one of your saved friends from the dropdown.';
     }
 
-    if (!friendTaskEditSuggestionForm.taskTitle.trim()) {
+    if (!friendTaskEditSuggestionForm.publicTaskId) {
       nextErrors.editTask =
-        'Choose one of their publicly viewable tasks from the dropdown.';
+        'Choose one of their publicly viewable tasks or routines from the dropdown.';
     }
 
     if (Object.keys(nextErrors).length > 0) {
@@ -3386,6 +3625,23 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
     }
 
     try {
+      const liveEditableTasks = friendTaskEditSuggestionForm.recipientAccountId
+        ? await loadLivePublicTasks(friendTaskEditSuggestionForm.recipientAccountId)
+        : [];
+      setFriendPublicTasks(liveEditableTasks);
+
+      const selectedPublicTask = liveEditableTasks.find(
+        (task) => task.id === friendTaskEditSuggestionForm.publicTaskId,
+      );
+
+      if (!selectedPublicTask) {
+        setFriendFormError(
+          'editTask',
+          'That item is no longer live. Choose a current task or routine from this friend.',
+        );
+        return;
+      }
+
       const today = toLocalDateString(new Date());
       const dueLocalValue = combineLocalDateTimeValue(
         friendTaskEditSuggestionForm.suggestedDueDate,
@@ -3409,7 +3665,35 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
         friendTaskEditSuggestionForm.suggestedPriority === 'auto'
           ? undefined
           : friendTaskEditSuggestionForm.suggestedPriority;
-      const changedFields = [
+      const suggestedRoutineRule =
+        selectedPublicTask.kind === 'routine'
+          ? buildSuggestedRoutineRule(friendTaskEditSuggestionForm)
+          : undefined;
+      const changedFields = selectedPublicTask.kind === 'routine' ? [
+        friendTaskEditSuggestionForm.suggestedTitle.trim()
+          ? `Title -> ${friendTaskEditSuggestionForm.suggestedTitle.trim()}`
+          : null,
+        friendTaskEditSuggestionForm.suggestedNotes.trim()
+          ? `Description -> ${friendTaskEditSuggestionForm.suggestedNotes.trim()}`
+          : null,
+        `Repeats every ${friendTaskEditSuggestionForm.suggestedRoutineInterval} ${friendTaskEditSuggestionForm.suggestedRoutineUnit}`,
+        friendTaskEditSuggestionForm.suggestedRoutineUnit === 'week'
+          ? `Weekdays -> ${friendTaskEditSuggestionForm.suggestedRoutineWeekdays
+              .map((weekday) => WEEKDAY_LABELS[weekday])
+              .join(', ')}`
+          : null,
+        `Start date -> ${friendTaskEditSuggestionForm.suggestedRoutineStartDate}`,
+        friendTaskEditSuggestionForm.suggestedRoutineEndDate
+          ? `End date -> ${friendTaskEditSuggestionForm.suggestedRoutineEndDate}`
+          : null,
+        friendTaskEditSuggestionForm.suggestedRoutineDueTime
+          ? `Due time -> ${friendTaskEditSuggestionForm.suggestedRoutineDueTime}`
+          : null,
+        friendTaskEditSuggestionForm.suggestedRoutineReminderTime
+          ? `Reminder time -> ${friendTaskEditSuggestionForm.suggestedRoutineReminderTime}`
+          : null,
+        `Priority -> ${formatPriorityLabel(friendTaskEditSuggestionForm.suggestedPriority)}`,
+      ].filter((value): value is string => Boolean(value)) : [
         friendTaskEditSuggestionForm.suggestedTitle.trim()
           ? `Title -> ${friendTaskEditSuggestionForm.suggestedTitle.trim()}`
           : null,
@@ -3427,22 +3711,44 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
         throw new Error('Add at least one suggested change.');
       }
 
+      if (selectedPublicTask.kind === 'routine') {
+        if (!friendTaskEditSuggestionForm.suggestedTitle.trim()) {
+          throw new Error('Add a suggested routine title.');
+        }
+
+        if (!friendTaskEditSuggestionForm.suggestedRoutineStartDate) {
+          throw new Error('Choose a suggested routine start date.');
+        }
+
+        if (
+          friendTaskEditSuggestionForm.suggestedRoutineUnit === 'week' &&
+          friendTaskEditSuggestionForm.suggestedRoutineWeekdays.length === 0
+        ) {
+          throw new Error('Choose at least one suggested weekday.');
+        }
+      }
+
       await window.todoApp.friendNetwork.sendPopup({
         recipientUsername: friendTaskEditSuggestionForm.recipientUsername,
         recipientAccountId: friendTaskEditSuggestionForm.recipientAccountId || undefined,
         senderName: friendTaskEditSuggestionForm.senderName,
         kind: 'task_edit_suggestion',
         priority: 'normal',
-        title: friendTaskEditSuggestionForm.taskTitle,
-        relatedTaskTitle: friendTaskEditSuggestionForm.taskTitle,
+        title: selectedPublicTask.title,
+        relatedTaskId: selectedPublicTask.sourceId,
+        relatedTaskTitle: selectedPublicTask.title,
         message: `Suggested changes:\n${changedFields.join('\n')}`,
         payload: {
-          taskTitle: friendTaskEditSuggestionForm.taskTitle,
+          taskId: selectedPublicTask.sourceId,
+          sharedTaskId: selectedPublicTask.id,
+          taskKind: selectedPublicTask.kind,
+          taskTitle: selectedPublicTask.title,
           suggestedTitle: friendTaskEditSuggestionForm.suggestedTitle,
           suggestedNotes: friendTaskEditSuggestionForm.suggestedNotes,
           suggestedDueAt,
           suggestedReminderAt,
           suggestedPriority,
+          suggestedRoutineRule,
         },
       });
       setFriendTaskEditSuggestionForm(createEmptyFriendTaskEditSuggestionForm());
@@ -3461,52 +3767,12 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
     await refreshAll();
   };
 
-  const handleRecentPasswordSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    setError(null);
-
-    try {
-      const isUnlocked = await window.todoApp.friendNetwork.verifyRecentPopupPassword(
-        recentPopupPasswordDraft,
-      );
-
-      if (!isUnlocked) {
-        setError('That recent-popups password did not match.');
-        return;
-      }
-
-      setIsRecentPopupsUnlocked(true);
-      setRecentPopupPasswordDraft('');
-      await refreshAll();
-    } catch (recentPasswordError) {
-      setError(getErrorMessage(recentPasswordError));
-    }
-  };
-
-  const handleSetRecentPasswordSubmit = async (
-    event: React.FormEvent<HTMLFormElement>,
-  ) => {
-    event.preventDefault();
-    setError(null);
-
-    try {
-      const nextStatus = await window.todoApp.friendNetwork.setRecentPopupPassword(
-        newRecentPopupPasswordDraft,
-      );
-      setFriendNetworkStatus(nextStatus);
-      setNewRecentPopupPasswordDraft('');
-      setIsRecentPopupsUnlocked(true);
-      await refreshAll();
-    } catch (recentPasswordError) {
-      setError(getErrorMessage(recentPasswordError));
-    }
-  };
-
   const handleEditRoutine = (template: RoutineTemplate) => {
     setActiveView('routines');
     setEditingRoutineId(template.id);
     setRoutineFormValues(createRoutineFormValues(template));
     setSelectedRoutineId(template.id);
+    setRoutineEditorOpen(true);
     setRoutineDetailsOpen(true);
   };
 
@@ -3533,7 +3799,6 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
     { id: 'friends', label: `Friends (${friendContacts.length})` },
     { id: 'send', label: 'Send' },
     { id: 'review', label: `Review (${pendingFriendSuggestionCount})` },
-    { id: 'settings', label: 'Settings' },
   ];
 
   const handleThemePresetChange = (presetId: ThemePresetId) => {
@@ -3561,6 +3826,41 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
     });
   };
 
+  const handleStartupToggle = async (enabled: boolean) => {
+    setError(null);
+
+    try {
+      const nextStartupSettings = await window.todoApp.app.setStartupEnabled(enabled);
+      setStartupSettings(nextStartupSettings);
+    } catch (startupError) {
+      setError(getErrorMessage(startupError));
+    }
+  };
+
+  const handleSettingsSyncAndUpdateCheck = async () => {
+    setError(null);
+    setSettingsSyncStatus(null);
+    setIsSettingsSyncing(true);
+
+    try {
+      let syncMessage = 'Local data refreshed.';
+
+      if (accountStatus?.session) {
+        const nextStatus = await window.todoApp.account.syncNow();
+        setAccountStatus(nextStatus);
+        syncMessage = 'Supabase sync complete.';
+      }
+
+      const updateResult = await window.todoApp.app.checkForUpdates();
+      await refreshAll();
+      setSettingsSyncStatus(`${syncMessage} ${updateResult.message}`);
+    } catch (settingsError) {
+      setError(getErrorMessage(settingsError));
+    } finally {
+      setIsSettingsSyncing(false);
+    }
+  };
+
   const headerTitle =
     activeView === 'today'
       ? todayLabel
@@ -3574,6 +3874,8 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
       ? 'History and streaks'
       : activeView === 'network'
       ? 'Friend network'
+      : activeView === 'settings'
+      ? 'Settings'
       : 'Website review queue';
 
   const headerCopy =
@@ -3588,7 +3890,9 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
       : activeView === 'history'
       ? 'Look back at passive task completions and routine streaks in one place.'
       : activeView === 'network'
-      ? 'Set your display name, control DND, and send popup messages to other installed apps.'
+      ? 'Save friends, exchange popups, and suggest tasks after signing in.'
+      : activeView === 'settings'
+      ? 'Manage your account, theme, do-not-disturb mode, and app startup preferences.'
       : 'Review website-submitted tasks and edit suggestions here before they touch your real planner.';
 
   return (
@@ -3598,12 +3902,6 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
           <div className="sidebar-brand">
             <p className="section-kicker">To Do List</p>
             <h1>Desktop Planner</h1>
-            <span className="status-chip accent">
-              {appInfo?.variant === 'user' ? 'user build' : 'dev build'}
-            </span>
-            <p className="section-copy">
-              Use the mini window for quick capture, then open the full app when you want a broader view.
-            </p>
           </div>
 
           <div className="sidebar-nav">
@@ -3612,7 +3910,7 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
               type="button"
               onClick={() => setActiveView('today')}
             >
-              Today
+              Task list
             </button>
             <button
               className={`sidebar-link ${activeView === 'planner' ? 'is-active' : ''}`}
@@ -3662,6 +3960,13 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
                 ? `Friend network (${pendingFriendEventCount})`
                 : 'Friend network'}
             </button>
+            <button
+              className={`sidebar-link ${activeView === 'settings' ? 'is-active' : ''}`}
+              type="button"
+              onClick={() => setActiveView('settings')}
+            >
+              Settings
+            </button>
           </div>
 
           <div className="sidebar-stats">
@@ -3687,75 +3992,6 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
               <strong>{overallRoutineRate}%</strong>
             </div>
           </div>
-
-          <div className="theme-card">
-            <div>
-              <p className="section-kicker">Theme</p>
-              <h2>{activeThemePalette.label}</h2>
-            </div>
-
-            <div className="theme-swatches" aria-hidden="true">
-              <span style={{ background: activeThemePalette.base }} />
-              <span style={{ background: activeThemePalette.accent }} />
-            </div>
-
-            <label className="field compact-field" htmlFor="theme-preset">
-              Palette
-              <select
-                id="theme-preset"
-                value={themeSettings.presetId}
-                onChange={(event) => {
-                  handleThemePresetChange(event.target.value as ThemePresetId);
-                }}
-              >
-                {THEME_PRESETS.map((preset) => (
-                  <option key={preset.id} value={preset.id}>
-                    {preset.label}
-                  </option>
-                ))}
-                <option value="custom">Custom</option>
-              </select>
-            </label>
-
-            <div className="theme-color-grid">
-              <label className="field compact-field" htmlFor="theme-base">
-                Base
-                <input
-                  id="theme-base"
-                  type="color"
-                  value={themeSettings.customBase}
-                  onChange={(event) =>
-                    handleCustomThemeColorChange('customBase', event.target.value)
-                  }
-                />
-              </label>
-              <label className="field compact-field" htmlFor="theme-accent">
-                Highlight
-                <input
-                  id="theme-accent"
-                  type="color"
-                  value={themeSettings.customAccent}
-                  onChange={(event) =>
-                    handleCustomThemeColorChange('customAccent', event.target.value)
-                  }
-                />
-              </label>
-            </div>
-          </div>
-
-          <button
-            className="soft-button primary sidebar-launch"
-            type="button"
-            onClick={() => {
-              void window.todoApp.quickAdd.open();
-            }}
-          >
-            Open mini window
-          </button>
-
-          <p className="sidebar-note">
-            Shortcut: <strong>{MINI_SHORTCUT_LABEL}</strong>
-          </p>
         </aside>
 
         <section className="main-pane">
@@ -3763,7 +3999,7 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
             <div>
               <p className="section-kicker">
                 {activeView === 'today'
-                  ? 'Today'
+                  ? 'Task list'
                   : activeView === 'planner'
                   ? 'Planner'
                   : activeView === 'week'
@@ -3774,28 +4010,36 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
                   ? 'History'
                   : activeView === 'network'
                   ? 'Friend network'
+                  : activeView === 'settings'
+                  ? 'Settings'
                   : 'Website queue'}
               </p>
               <h2>{headerTitle}</h2>
               <p className="section-copy">{headerCopy}</p>
             </div>
 
-            <div className="header-actions">
-              <button
-                className="soft-button primary"
-                type="button"
-                onClick={() => {
-                  void window.todoApp.quickAdd.open();
-                }}
-              >
-                Mini window
-              </button>
-            </div>
+            {activeView === 'settings' ? (
+              <div className="header-actions">
+                <button
+                  className="soft-button primary"
+                  type="button"
+                  disabled={isSettingsSyncing}
+                  onClick={() => {
+                    void handleSettingsSyncAndUpdateCheck();
+                  }}
+                >
+                  {isSettingsSyncing ? 'Syncing...' : 'Sync + check updates'}
+                </button>
+              </div>
+            ) : null}
           </header>
 
           {error ? <div className="banner">{error}</div> : null}
+          {activeView === 'settings' && settingsSyncStatus ? (
+            <div className="banner success-banner">{settingsSyncStatus}</div>
+          ) : null}
 
-          {activeView === 'network' ? (
+          {activeView === 'settings' ? (
           <section className="panel-card account-card">
             <div className="panel-top">
               <div>
@@ -3910,6 +4154,194 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
               <p className="field-hint danger-text">{accountStatus.syncError}</p>
             ) : null}
           </section>
+          ) : null}
+
+          {activeView === 'settings' ? (
+            <>
+              <section className="panel-card">
+                <div className="panel-top">
+                  <div>
+                    <p className="section-kicker">Theme</p>
+                    <h3>{activeThemePalette.label}</h3>
+                    <p className="section-copy">
+                      Pick a built-in palette or make your own base and highlight colors.
+                    </p>
+                  </div>
+                  <div className="theme-swatches settings-swatches" aria-hidden="true">
+                    <span style={{ background: activeThemePalette.base }} />
+                    <span style={{ background: activeThemePalette.accent }} />
+                  </div>
+                </div>
+
+                <div className="split-fields">
+                  <label className="field" htmlFor="theme-preset">
+                    Palette
+                    <select
+                      id="theme-preset"
+                      value={themeSettings.presetId}
+                      onChange={(event) => {
+                        handleThemePresetChange(event.target.value as ThemePresetId);
+                      }}
+                    >
+                      {THEME_PRESETS.map((preset) => (
+                        <option key={preset.id} value={preset.id}>
+                          {preset.label}
+                        </option>
+                      ))}
+                      <option value="custom">Custom</option>
+                    </select>
+                  </label>
+
+                  <div className="theme-color-grid">
+                    <label className="field compact-field" htmlFor="theme-base">
+                      Base
+                      <input
+                        id="theme-base"
+                        type="color"
+                        value={themeSettings.customBase}
+                        onChange={(event) =>
+                          handleCustomThemeColorChange('customBase', event.target.value)
+                        }
+                      />
+                    </label>
+                    <label className="field compact-field" htmlFor="theme-accent">
+                      Highlight
+                      <input
+                        id="theme-accent"
+                        type="color"
+                        value={themeSettings.customAccent}
+                        onChange={(event) =>
+                          handleCustomThemeColorChange('customAccent', event.target.value)
+                        }
+                      />
+                    </label>
+                  </div>
+                </div>
+              </section>
+
+              <section className="panel-card">
+                <div className="panel-top">
+                  <div>
+                    <p className="section-kicker">Friend identity</p>
+                    <h3>{friendNetworkStatus?.deviceName ?? 'Local device'}</h3>
+                    <p className="section-copy">
+                      Device ID: {friendNetworkStatus?.deviceKey ?? 'Not loaded yet'}
+                    </p>
+                    {friendNetworkStatus?.profileName ? (
+                      <p className="field-hint">
+                        Local test profile: {friendNetworkStatus.profileName}
+                      </p>
+                    ) : null}
+                  </div>
+                  <span className="status-chip accent">
+                    {accountStatus?.session?.displayName ??
+                      accountStatus?.session?.username ??
+                      'sign in'}
+                  </span>
+                </div>
+
+                {!friendNetworkStatus?.isConfigured ? (
+                  <p className="empty-state">
+                    Friend network tables are not ready yet. Run the Supabase SQL from this repo,
+                    then restart the app.
+                  </p>
+                ) : null}
+
+                {accountStatus?.session ? (
+                  <form className="composer-form" onSubmit={handleDisplayNameSubmit}>
+                    <div className="field">
+                      <label htmlFor="display-name">Your display name</label>
+                      <input
+                        id="display-name"
+                        value={displayNameDraft}
+                        maxLength={64}
+                        placeholder={accountStatus.session.displayName ?? 'Optional'}
+                        onChange={(event) => setDisplayNameDraft(event.target.value)}
+                      />
+                      <p className="field-hint">
+                        Friends add you by @{accountStatus.session.username}. This optional name is
+                        what they see unless they set their own private nickname for you. Save it
+                        blank to fall back to your username.
+                      </p>
+                    </div>
+                    <button className="soft-button primary" type="submit">
+                      Save display name
+                    </button>
+                  </form>
+                ) : (
+                  <p className="empty-state">
+                    Sign in above before using app-to-app friends and popups.
+                  </p>
+                )}
+              </section>
+
+              <section className="panel-card">
+                <div className="panel-top">
+                  <div>
+                    <p className="section-kicker">Do not disturb</p>
+                    <h3>Control what turns into a popup</h3>
+                  </div>
+                  <span className="status-chip accent">
+                    {friendNetworkStatus?.dndMode ?? 'off'}
+                  </span>
+                </div>
+
+                <div className="picker-row">
+                  {(['off', 'quiet', 'full'] as AppDndMode[]).map((mode) => (
+                    <button
+                      key={mode}
+                      className={`picker-chip ${
+                        friendNetworkStatus?.dndMode === mode ? 'is-active' : ''
+                      }`}
+                      type="button"
+                      onClick={() => {
+                        void handleDndModeChange(mode);
+                      }}
+                    >
+                      {mode === 'off' ? 'Off' : mode === 'quiet' ? 'Quiet' : 'Full DND'}
+                    </button>
+                  ))}
+                </div>
+
+                <p className="field-hint">
+                  Quiet queues normal popups and suggestions but lets emergency popups through.
+                  Full DND queues everything until you turn DND off.
+                </p>
+              </section>
+
+              <section className="panel-card">
+                <div className="panel-top">
+                  <div>
+                    <p className="section-kicker">Startup</p>
+                    <h3>Open automatically when Windows starts</h3>
+                    <p className="section-copy">
+                      Keep the planner available in the background after this is installed as the
+                      packaged app.
+                    </p>
+                  </div>
+                  <span className={`status-chip ${startupSettings?.openAtLogin ? 'success' : 'muted'}`}>
+                    {startupSettings?.openAtLogin ? 'enabled' : 'off'}
+                  </span>
+                </div>
+                <label className="inline-check">
+                  <input
+                    type="checkbox"
+                    checked={startupSettings?.openAtLogin ?? false}
+                    disabled={!startupSettings?.isSupported}
+                    onChange={(event) => {
+                      void handleStartupToggle(event.target.checked);
+                    }}
+                  />
+                  Start app when I sign in
+                </label>
+                {!startupSettings?.isSupported ? (
+                  <p className="field-hint">
+                    Startup mode only works from the installed EXE build, not while running through
+                    VS Code.
+                  </p>
+                ) : null}
+              </section>
+            </>
           ) : null}
 
           {activeView === 'today' ? (
@@ -4151,168 +4583,356 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
 
           {activeView === 'planner' ? (
             <div className="planner-layout">
-              <section className="panel-card planner-calendar">
-                <div className="panel-top">
-                  <div>
-                    <p className="section-kicker">Daily planner</p>
-                    <h3>{formatDateOnly(plannerDate)}</h3>
-                    <p className="section-copy">
-                      Due tasks stay visible here until you decide when the work actually fits.
-                    </p>
-                  </div>
-                  <div className="history-nav">
-                    <button
-                      className="soft-button"
-                      type="button"
-                      onClick={() => {
-                        const nextDate = addDaysToDateString(plannerDate, -1);
-                        setPlannerDate(nextDate);
-                        setTimeBlockForm((current) => ({ ...current, date: nextDate }));
-                      }}
-                    >
-                      Prev
-                    </button>
-                    <input
-                      className="planner-date-input"
-                      type="date"
-                      value={plannerDate}
-                      onChange={(event) => {
-                        setPlannerDate(event.target.value);
-                        setTimeBlockForm((current) => ({
-                          ...current,
-                          date: event.target.value,
-                        }));
-                      }}
-                    />
-                    <button
-                      className="soft-button"
-                      type="button"
-                      onClick={() => {
-                        const nextDate = addDaysToDateString(plannerDate, 1);
-                        setPlannerDate(nextDate);
-                        setTimeBlockForm((current) => ({ ...current, date: nextDate }));
-                      }}
-                    >
-                      Next
-                    </button>
-                  </div>
+              <section className="panel-card planner-hero">
+                <div className="planner-hero-copy">
+                  <p className="section-kicker">Daily planner</p>
+                  <h3>{formatDateOnly(plannerDate)}</h3>
+                  <p className="section-copy">
+                    Turn the loose work queue into a visible day: deadlines, focus blocks, and
+                    open tasks all live in one planning surface.
+                  </p>
                 </div>
-
+                <div className="planner-date-nav" aria-label="Planner date controls">
+                  <button
+                    className="soft-button"
+                    type="button"
+                    onClick={() => {
+                      const nextDate = addDaysToDateString(plannerDate, -1);
+                      setPlannerDate(nextDate);
+                      setTimeBlockForm((current) => ({ ...current, date: nextDate }));
+                    }}
+                  >
+                    Prev
+                  </button>
+                  <input
+                    className="planner-date-input"
+                    type="date"
+                    value={plannerDate}
+                    onChange={(event) => {
+                      setPlannerDate(event.target.value);
+                      setTimeBlockForm((current) => ({
+                        ...current,
+                        date: event.target.value,
+                      }));
+                    }}
+                  />
+                  <button
+                    className="soft-button"
+                    type="button"
+                    onClick={() => {
+                      const nextDate = addDaysToDateString(plannerDate, 1);
+                      setPlannerDate(nextDate);
+                      setTimeBlockForm((current) => ({ ...current, date: nextDate }));
+                    }}
+                  >
+                    Next
+                  </button>
+                </div>
                 <div className="planner-score">
-                  <span className="status-chip accent">{Math.round(plannerMinutes)} min planned</span>
-                  <span className="status-chip success">
-                    {plannerBlocks.filter((block) => block.status === 'completed').length} done
+                  <span className="planner-stat">
+                    <strong>{formatMinutes(plannerMinutes)}</strong>
+                    <span>Planned</span>
                   </span>
-                  <span className="status-chip muted">{dueTasksForPlannerDate.length} due</span>
-                  <span className="status-chip muted">{unplannedTasks.length} unplanned</span>
-                </div>
-
-                <div className="planner-deadlines">
-                  <div className="mini-section-head">
-                    <h4>Due on this date</h4>
-                  </div>
-                  {dueTasksForPlannerDate.length === 0 ? (
-                    <p className="empty-state">No task deadlines land on this date.</p>
-                  ) : (
-                    dueTasksForPlannerDate.map((task) => (
-                      <button
-                        key={task.id}
-                        className="deadline-chip"
-                        type="button"
-                        onClick={() => setSelectedTaskId(task.id)}
-                      >
-                        {task.title}
-                      </button>
-                    ))
-                  )}
-                </div>
-
-                <div
-                  className="time-block-stack"
-                  onDragOver={(event) => event.preventDefault()}
-                  onDrop={(event) => {
-                    event.preventDefault();
-                    planDroppedTask(event.dataTransfer.getData('text/task-id'));
-                  }}
-                >
-                  {plannerBlocks.length === 0 ? (
-                    <p className="empty-state">
-                      No blocks planned yet. Dragging is a future polish pass; for now use the
-                      compact block form or plan an open task from the right.
-                    </p>
-                  ) : (
-                    plannerBlocks.map((block) => {
-                      const linkedTask = tasks.find((task) => task.id === block.taskId);
-                      const hasConflict = plannerBlocks.some(
-                        (candidate) =>
-                          candidate.id !== block.id &&
-                          candidate.startAt < block.endAt &&
-                          candidate.endAt > block.startAt,
-                      );
-
-                      return (
-                        <article
-                          key={block.id}
-                          className={`time-block-card is-${block.status}${
-                            hasConflict ? ' has-conflict' : ''
-                          }`}
-                        >
-                          <div>
-                            <div className="row-title">
-                              {formatDateTime(block.startAt)} to{' '}
-                              {new Intl.DateTimeFormat(undefined, {
-                                hour: 'numeric',
-                                minute: '2-digit',
-                              }).format(new Date(block.endAt))}
-                            </div>
-                            <h4>{block.title}</h4>
-                            <p className="row-meta">
-                              {linkedTask ? `Linked task: ${linkedTask.title}` : 'Focus block'}
-                              {block.enableDnd ? ' | DND-ready focus block' : ''}
-                              {hasConflict ? ' | overlaps another block' : ''}
-                            </p>
-                            {block.notes ? <p className="row-note">{block.notes}</p> : null}
-                          </div>
-                          <div className="row-actions">
-                            {block.status !== 'completed' ? (
-                              <button
-                                className="soft-button primary"
-                                type="button"
-                                onClick={() => void handleTimeBlockStatus(block, 'completed')}
-                              >
-                                Done
-                              </button>
-                            ) : null}
-                            {block.status !== 'missed' ? (
-                              <button
-                                className="soft-button"
-                                type="button"
-                                onClick={() => void handleTimeBlockStatus(block, 'missed')}
-                              >
-                                Missed
-                              </button>
-                            ) : null}
-                            <button
-                              className="soft-button"
-                              type="button"
-                              onClick={() => void handleMoveTimeBlock(block, 60)}
-                            >
-                              Move +1h
-                            </button>
-                            <button
-                              className="link-button"
-                              type="button"
-                              onClick={() => void handleDeleteTimeBlock(block.id)}
-                            >
-                              Delete
-                            </button>
-                          </div>
-                        </article>
-                      );
-                    })
-                  )}
+                  <span className="planner-stat">
+                    <strong>{plannerBlocks.length}</strong>
+                    <span>Blocks</span>
+                  </span>
+                  <span className="planner-stat">
+                    <strong>{plannerCompletionCount}</strong>
+                    <span>Done</span>
+                  </span>
+                  <span className="planner-stat">
+                    <strong>{plannerInboxCount}</strong>
+                    <span>Open items</span>
+                  </span>
                 </div>
               </section>
+
+              <div className="network-tabs planner-tabs" role="tablist" aria-label="Planner sections">
+                <button
+                  className={`network-tab ${activePlannerPanel === 'day' ? 'is-active' : ''}`}
+                  type="button"
+                  onClick={() => setActivePlannerPanel('day')}
+                >
+                  Day plan
+                </button>
+                <button
+                  className={`network-tab ${activePlannerPanel === 'week' ? 'is-active' : ''}`}
+                  type="button"
+                  onClick={() => setActivePlannerPanel('week')}
+                >
+                  Week sketch
+                </button>
+              </div>
+
+              {activePlannerPanel === 'day' ? (
+                <>
+              <section
+                className="panel-card planner-timeline"
+              >
+                <div className="panel-top">
+                  <div>
+                    <p className="section-kicker">Day schedule</p>
+                    <h3>Calendar</h3>
+                    <p className="section-copy">
+                      Drag tasks or routines onto an hour. Click a block to edit it or read notes.
+                    </p>
+                  </div>
+                  <span className="status-chip accent">{formatMinutes(plannerMinutes)}</span>
+                </div>
+
+                <div className="calendar-scroll">
+                  <div
+                    className="day-calendar"
+                    style={{ minHeight: `${24 * CALENDAR_HOUR_HEIGHT}px` }}
+                  >
+                    <div className="calendar-hours">
+                      {calendarHours.map((hour) => (
+                        <div
+                          key={hour}
+                          className="calendar-hour-row"
+                          style={{ height: `${CALENDAR_HOUR_HEIGHT}px` }}
+                          onDragOver={(event) => event.preventDefault()}
+                          onDrop={(event) => {
+                            event.preventDefault();
+                            planDroppedItem(
+                              event.dataTransfer.getData('text/planner-item'),
+                              plannerDate,
+                              hour,
+                            );
+                          }}
+                        >
+                          <span>{formatHourLabel(hour)}</span>
+                        </div>
+                      ))}
+                    </div>
+
+                    <div className="calendar-block-layer" aria-label="Planned blocks">
+                      {sortedPlannerBlocks.map((block) => {
+                        const hasConflict = plannerBlocks.some(
+                          (candidate) =>
+                            candidate.id !== block.id &&
+                            candidate.startAt < block.endAt &&
+                            candidate.endAt > block.startAt,
+                        );
+                        const isEditingBlock = editingTimeBlockId === block.id;
+
+                        return isEditingBlock && editingTimeBlockForm ? (
+                          <article
+                            key={block.id}
+                            className={`calendar-block calendar-block-editor is-${block.status}${
+                              hasConflict ? ' has-conflict' : ''
+                            } is-editing`}
+                            style={{
+                              ...getCalendarBlockStyle(block),
+                              height: 'auto',
+                              minHeight: '300px',
+                              zIndex: 5,
+                            }}
+                          >
+                            <form className="inline-block-editor" onSubmit={handleInlineTimeBlockSubmit}>
+                              <div className="field">
+                                <label htmlFor={`inline-block-title-${block.id}`}>Title</label>
+                                <input
+                                  id={`inline-block-title-${block.id}`}
+                                  value={editingTimeBlockForm.title}
+                                  onChange={(event) =>
+                                    setEditingTimeBlockForm((current) =>
+                                      current ? { ...current, title: event.target.value } : current,
+                                    )
+                                  }
+                                />
+                              </div>
+                              <div className="three-fields">
+                                <div className="field">
+                                  <label htmlFor={`inline-block-date-${block.id}`}>Date</label>
+                                  <input
+                                    id={`inline-block-date-${block.id}`}
+                                    type="date"
+                                    value={editingTimeBlockForm.date}
+                                    onChange={(event) =>
+                                      setEditingTimeBlockForm((current) =>
+                                        current ? { ...current, date: event.target.value } : current,
+                                      )
+                                    }
+                                  />
+                                </div>
+                                <div className="field">
+                                  <label htmlFor={`inline-block-start-${block.id}`}>Start</label>
+                                  <input
+                                    id={`inline-block-start-${block.id}`}
+                                    type="time"
+                                    value={editingTimeBlockForm.startTime}
+                                    onChange={(event) =>
+                                      setEditingTimeBlockForm((current) =>
+                                        current
+                                          ? { ...current, startTime: event.target.value }
+                                          : current,
+                                      )
+                                    }
+                                  />
+                                </div>
+                                <div className="field">
+                                  <label htmlFor={`inline-block-end-${block.id}`}>End</label>
+                                  <input
+                                    id={`inline-block-end-${block.id}`}
+                                    type="time"
+                                    value={editingTimeBlockForm.endTime}
+                                    onChange={(event) =>
+                                      setEditingTimeBlockForm((current) =>
+                                        current ? { ...current, endTime: event.target.value } : current,
+                                      )
+                                    }
+                                  />
+                                </div>
+                              </div>
+                              <div className="field">
+                                <label htmlFor={`inline-block-notes-${block.id}`}>Notes</label>
+                                <textarea
+                                  id={`inline-block-notes-${block.id}`}
+                                  value={editingTimeBlockForm.notes}
+                                  placeholder="Notes for this block"
+                                  onChange={(event) =>
+                                    setEditingTimeBlockForm((current) =>
+                                      current ? { ...current, notes: event.target.value } : current,
+                                    )
+                                  }
+                                />
+                              </div>
+                              <label className="inline-check">
+                                <input
+                                  type="checkbox"
+                                  checked={editingTimeBlockForm.enableDnd}
+                                  onChange={(event) =>
+                                    setEditingTimeBlockForm((current) =>
+                                      current
+                                        ? { ...current, enableDnd: event.target.checked }
+                                        : current,
+                                    )
+                                  }
+                                />
+                                DND-ready focus block
+                              </label>
+                              <div className="row-actions">
+                                <button className="soft-button primary" type="submit" disabled={isSubmitting}>
+                                  Save
+                                </button>
+                                <button
+                                  className="soft-button"
+                                  type="button"
+                                  disabled={isSubmitting}
+                                  onClick={handleCancelTimeBlockEdit}
+                                >
+                                  Cancel
+                                </button>
+                                {block.status !== 'completed' ? (
+                                  <button
+                                    className="soft-button"
+                                    type="button"
+                                    disabled={isSubmitting}
+                                    onClick={() => void handleTimeBlockStatus(block, 'completed')}
+                                  >
+                                    Done
+                                  </button>
+                                ) : null}
+                                <button
+                                  className="link-button"
+                                  type="button"
+                                  disabled={isSubmitting}
+                                  onClick={() => void handleDeleteTimeBlock(block.id)}
+                                >
+                                  Delete
+                                </button>
+                              </div>
+                            </form>
+                          </article>
+                        ) : (
+                          <button
+                            key={block.id}
+                            className={`calendar-block is-${block.status}${
+                              hasConflict ? ' has-conflict' : ''
+                            }`}
+                            type="button"
+                            style={getCalendarBlockStyle(block)}
+                            onClick={() => handleEditTimeBlock(block)}
+                            title={`${formatTimeOnly(block.startAt)}-${formatTimeOnly(
+                              block.endAt,
+                            )} ${block.title}`}
+                          >
+                            <strong>{block.title}</strong>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+              </section>
+
+              <div className="planner-right-rail">
+                <section className="panel-card planner-inbox">
+                  <div className="mini-section-head">
+                    <div>
+                      <p className="section-kicker">Inbox</p>
+                      <h3>Open tasks and routines</h3>
+                    </div>
+                    <span className="status-chip muted">{plannerInboxCount}</span>
+                  </div>
+                  {plannerInboxCount === 0 ? (
+                    <p className="empty-state">Everything open already has a block.</p>
+                  ) : (
+                    <div className="planner-task-list">
+                      {unplannedTasks.map((task) => (
+                        <article
+                          key={task.id}
+                          className="planner-task"
+                          draggable
+                          onDragStart={(event) =>
+                            event.dataTransfer.setData('text/planner-item', `task:${task.id}`)
+                          }
+                        >
+                          <div>
+                            <div className="row-title">{task.title}</div>
+                            <div className="row-meta">
+                              {task.dueAt ? `Due ${formatDateTime(task.dueAt)}` : 'No deadline'}
+                            </div>
+                          </div>
+                          <button
+                            className="soft-button"
+                            type="button"
+                            onClick={() => void planTaskForDate(task)}
+                          >
+                            Plan
+                          </button>
+                        </article>
+                      ))}
+                      {plannableRoutines.map((item) => (
+                        <article
+                          key={item.template.id}
+                          className="planner-task"
+                          draggable
+                          onDragStart={(event) =>
+                            event.dataTransfer.setData(
+                              'text/planner-item',
+                              `routine:${item.template.id}`,
+                            )
+                          }
+                        >
+                          <div>
+                            <div className="row-title">{item.template.title}</div>
+                            <div className="row-meta">{formatRoutineRule(item.template.rule)}</div>
+                          </div>
+                          <button
+                            className="soft-button"
+                            type="button"
+                            onClick={() => void planRoutineForDate(item)}
+                          >
+                            Plan
+                          </button>
+                        </article>
+                      ))}
+                    </div>
+                  )}
+                </section>
 
               <section className="panel-card planner-side">
                 <div>
@@ -4356,7 +4976,7 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
                       ))}
                     </select>
                   </div>
-                  <div className="three-fields">
+                  <div className="planner-block-time-fields">
                     <div className="field">
                       <label htmlFor="block-date">Date</label>
                       <input
@@ -4413,84 +5033,122 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
                     />
                     Mark as a DND-ready focus block
                   </label>
+                  <div className="field">
+                    <label htmlFor="block-notes">Notes</label>
+                    <textarea
+                      id="block-notes"
+                      value={timeBlockForm.notes}
+                      placeholder="What would make this block successful?"
+                      onChange={(event) =>
+                        setTimeBlockForm((current) => ({
+                          ...current,
+                          notes: event.target.value,
+                        }))
+                      }
+                    />
+                  </div>
                   <button className="soft-button primary" type="submit" disabled={isSubmitting}>
                     Add block
                   </button>
                 </form>
-
-                <div className="planner-inbox">
-                  <div className="mini-section-head">
-                    <h4>Unplanned task inbox</h4>
-                  </div>
-                  {unplannedTasks.slice(0, 7).map((task) => (
-                    <article
-                      key={task.id}
-                      className="planner-task"
-                      draggable
-                      onDragStart={(event) =>
-                        event.dataTransfer.setData('text/task-id', task.id)
-                      }
-                    >
-                      <div>
-                        <div className="row-title">{task.title}</div>
-                        <div className="row-meta">
-                          {task.dueAt ? `Due ${formatDateTime(task.dueAt)}` : 'No deadline'}
-                        </div>
-                      </div>
-                      <button
-                        className="soft-button"
-                        type="button"
-                        onClick={() => void planTaskForDate(task)}
-                      >
-                        Plan
-                      </button>
-                    </article>
-                  ))}
-                </div>
               </section>
+              </div>
+                </>
+              ) : null}
 
+              {activePlannerPanel === 'week' ? (
               <section className="panel-card planner-week">
-                <div>
-                  <p className="section-kicker">Week sketch</p>
-                  <h3>Blocks and deadlines at a glance</h3>
+                <div className="panel-top">
+                  <div>
+                    <p className="section-kicker">Week sketch</p>
+                    <h3>Time-block map</h3>
+                    <p className="section-copy">
+                      Scan where the week has room. Drop an item into any hour to sketch a block.
+                    </p>
+                  </div>
                 </div>
-                <div className="week-grid">
-                  {plannerWeekDates.map((dateValue) => {
-                    const blocksForDate = timeBlocks.filter(
-                      (block) => toLocalDateString(new Date(block.startAt)) === dateValue,
-                    );
-                    const dueForDate = pendingTasks.filter(
-                      (task) =>
-                        task.dueAt && toLocalDateString(new Date(task.dueAt)) === dateValue,
-                    );
 
-                    return (
+                <div className="week-sketch-scroll">
+                  <div className="week-sketch">
+                    <div className="week-sketch-corner">
+                      {formatMonthLabel(plannerDate)}
+                    </div>
+                    {plannerWeekDates.map((dateValue) => (
                       <button
-                        key={dateValue}
-                        className={`week-card planner-week-card${
-                          dateValue === plannerDate ? ' is-today' : ''
+                        key={`header-${dateValue}`}
+                        className={`week-sketch-day-header${
+                          dateValue === plannerDate ? ' is-selected' : ''
                         }`}
                         type="button"
-                        onClick={() => {
-                          setPlannerDate(dateValue);
-                          setTimeBlockForm((current) => ({ ...current, date: dateValue }));
-                        }}
-                        onDragOver={(event) => event.preventDefault()}
-                        onDrop={(event) => {
-                          event.preventDefault();
-                          planDroppedTask(event.dataTransfer.getData('text/task-id'), dateValue);
-                        }}
+                        onClick={() => setPlannerDate(dateValue)}
                       >
-                        <div className="week-card-header">
-                          <div className="week-card-title">{formatDateOnly(dateValue)}</div>
-                          <span className="status-chip muted">{blocksForDate.length} blocks</span>
-                        </div>
-                        <p className="row-meta">{dueForDate.length} due tasks</p>
+                        <span>{WEEKDAY_LABELS[getWeekdayForDateString(dateValue)].slice(0, 1)}</span>
+                        <strong>{new Date(`${dateValue}T12:00:00`).getDate()}</strong>
                       </button>
-                    );
-                  })}
+                    ))}
+                    <div className="week-sketch-times">
+                      {calendarHours.map((hour) => (
+                        <div
+                          key={`week-hour-${hour}`}
+                          className="week-sketch-time"
+                          style={{ height: `${CALENDAR_HOUR_HEIGHT}px` }}
+                        >
+                          {formatHourLabel(hour)}
+                        </div>
+                      ))}
+                    </div>
+                    {plannerWeekDates.map((dateValue) => {
+                      const blocksForDate = timeBlocks.filter(
+                        (block) => toLocalDateString(new Date(block.startAt)) === dateValue,
+                      );
+
+                      return (
+                        <div
+                          key={`column-${dateValue}`}
+                          className="week-sketch-day"
+                          style={{ height: `${24 * CALENDAR_HOUR_HEIGHT}px` }}
+                        >
+                          {calendarHours.map((hour) => (
+                            <div
+                              key={`${dateValue}-${hour}`}
+                              className="week-sketch-hour"
+                              style={{ height: `${CALENDAR_HOUR_HEIGHT}px` }}
+                              onDragOver={(event) => event.preventDefault()}
+                              onDrop={(event) => {
+                                event.preventDefault();
+                                planDroppedItem(
+                                  event.dataTransfer.getData('text/planner-item'),
+                                  dateValue,
+                                  hour,
+                                );
+                              }}
+                            />
+                          ))}
+                          {blocksForDate.map((block) => (
+                            <button
+                              key={block.id}
+                              className={`week-sketch-block is-${block.status}`}
+                              type="button"
+                              style={getCalendarBlockStyle(block)}
+                              onClick={() => {
+                                setPlannerDate(dateValue);
+                                setActivePlannerPanel('day');
+                                handleEditTimeBlock(block);
+                              }}
+                              title={`${formatTimeOnly(block.startAt)}-${formatTimeOnly(
+                                block.endAt,
+                              )} ${block.title}`}
+                            >
+                              {block.title}
+                            </button>
+                          ))}
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
               </section>
+              ) : null}
             </div>
           ) : null}
 
@@ -4552,11 +5210,22 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
                     </p>
                   </div>
 
-                  {editingRoutineId ? (
-                    <span className="status-chip accent">Editing routine</span>
-                  ) : null}
+                  <div className="row-actions">
+                    {editingRoutineId ? (
+                      <span className="status-chip accent">Editing routine</span>
+                    ) : null}
+                    <button
+                      className="icon-button"
+                      type="button"
+                      aria-label={routineEditorOpen ? 'Collapse routine form' : 'Expand routine form'}
+                      onClick={() => setRoutineEditorOpen((current) => !current)}
+                    >
+                      {routineEditorOpen ? '-' : '+'}
+                    </button>
+                  </div>
                 </div>
 
+                {routineEditorOpen ? (
                 <form className="composer-form" onSubmit={handleRoutineSubmit}>
                   <div className="quick-row routine-quick-row">
                     <input
@@ -4688,6 +5357,7 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
                         onClick={() => {
                           setEditingRoutineId(null);
                           setRoutineFormValues(createEmptyRoutineForm());
+                          setRoutineEditorOpen(false);
                         }}
                       >
                         Cancel edit
@@ -4821,6 +5491,7 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
                     </div>
                   ) : null}
                 </form>
+                ) : null}
               </section>
 
               <section className="panel-card">
@@ -5206,66 +5877,13 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
                 ))}
               </div>
 
+              {!accountStatus?.session ? (
+                <p className="empty-state">
+                  Please log in from Settings to communicate with other users.
+                </p>
+              ) : null}
+
               <div className="list-stack">
-                {activeNetworkPanel === 'settings' ? (
-                <section className="details-panel">
-                  <div className="panel-top">
-                    <div>
-                      <p className="section-kicker">This app</p>
-                      <h4>{friendNetworkStatus?.deviceName ?? 'Local device'}</h4>
-                      <p className="field-hint">
-                        Device ID: {friendNetworkStatus?.deviceKey ?? 'Not loaded yet'}
-                      </p>
-                      {friendNetworkStatus?.profileName ? (
-                        <p className="field-hint">
-                          Local test profile: {friendNetworkStatus.profileName}
-                        </p>
-                      ) : null}
-                    </div>
-                    <span className="status-chip accent">
-                      {accountStatus?.session?.displayName ??
-                        accountStatus?.session?.username ??
-                        'sign in'}
-                    </span>
-                  </div>
-
-                  {!friendNetworkStatus?.isConfigured ? (
-                    <p className="empty-state">
-                      Friend network tables are not ready yet. Run the Supabase SQL from this repo,
-                      then restart the app.
-                    </p>
-                  ) : null}
-
-                  {accountStatus?.session ? (
-                    <form className="composer-form" onSubmit={handleDisplayNameSubmit}>
-                    <div className="field">
-                      <label htmlFor="display-name">Your display name</label>
-                      <input
-                        id="display-name"
-                        value={displayNameDraft}
-                        maxLength={64}
-                        placeholder={accountStatus.session.displayName ?? 'Optional'}
-                        onChange={(event) => setDisplayNameDraft(event.target.value)}
-                      />
-                      <p className="field-hint">
-                        Friends add you by @{accountStatus.session.username}. This optional name is
-                        what they see unless they set their own private nickname for you. Save it
-                        blank to fall back to your username.
-                      </p>
-                    </div>
-                    <button className="soft-button primary" type="submit">
-                      Save display name
-                    </button>
-                    </form>
-                  ) : (
-                    <p className="empty-state">
-                      Sign in before using app-to-app friends and popups.
-                    </p>
-                  )}
-
-                </section>
-                ) : null}
-
                 {activeNetworkPanel === 'friends' ? (
                 <section className="details-panel">
                   <div className="panel-top">
@@ -5545,46 +6163,6 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
                 </section>
                 ) : null}
 
-                {activeNetworkPanel === 'settings' ? (
-                <section className="details-panel">
-                  <div className="panel-top">
-                    <div>
-                      <p className="section-kicker">Do not disturb</p>
-                      <h4>Control what turns into a popup</h4>
-                    </div>
-                    <span className="status-chip accent">
-                      {friendNetworkStatus?.dndMode ?? 'off'}
-                    </span>
-                  </div>
-
-                  <div className="picker-row">
-                    {(['off', 'quiet', 'full'] as AppDndMode[]).map((mode) => (
-                      <button
-                        key={mode}
-                        className={`picker-chip ${
-                          friendNetworkStatus?.dndMode === mode ? 'is-active' : ''
-                        }`}
-                        type="button"
-                        onClick={() => {
-                          void handleDndModeChange(mode);
-                        }}
-                      >
-                        {mode === 'off'
-                          ? 'Off'
-                          : mode === 'quiet'
-                          ? 'Quiet'
-                          : 'Full DND'}
-                      </button>
-                    ))}
-                  </div>
-
-                  <p className="field-hint">
-                    Quiet queues normal popups and suggestions but lets emergency popups through.
-                    Full DND queues everything until you turn DND off.
-                  </p>
-                </section>
-                ) : null}
-
                 {activeNetworkPanel === 'review' ? (
                 <section className="details-panel">
                   <div className="panel-top">
@@ -5659,8 +6237,8 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
                 ) : null}
 
                 {activeNetworkPanel === 'send' ? (
-                <section className="details-panel">
-                  <div className="panel-top">
+                <details className="details-panel collapsible-panel" open>
+                  <summary className="collapsible-summary">
                     <div>
                       <p className="section-kicker">Send popup</p>
                       <h4>Test app-to-app delivery</h4>
@@ -5668,7 +6246,7 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
                     <span className="status-chip muted">
                       {queuedFriendPopupCount} queued messages
                     </span>
-                  </div>
+                  </summary>
 
                   <form className="composer-form" onSubmit={handleFriendPopupSubmit}>
                     <div className="split-fields">
@@ -5681,11 +6259,13 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
                         error={friendFormErrors.popupRecipient}
                         onSelect={applyContactToPopupForm}
                         onClear={(value) => {
-                          clearFriendFormErrors('popupRecipient');
+                          clearFriendFormErrors('popupRecipient', 'popupTask');
+                          setFriendPopupTasks([]);
                           setFriendPopupForm((current) => ({
                             ...current,
                             recipientUsername: value,
                             recipientAccountId: '',
+                            relatedTaskId: '',
                           }));
                         }}
                       />
@@ -5707,11 +6287,43 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
                     </div>
 
                     <div className="field">
+                      <label htmlFor="popup-related-task">Related task</label>
+                      <select
+                        id="popup-related-task"
+                        value={friendPopupForm.relatedTaskId}
+                        disabled={
+                          !friendPopupForm.recipientAccountId || isLoadingFriendPopupTasks
+                        }
+                        onChange={(event) =>
+                          setFriendPopupForm((current) => ({
+                            ...current,
+                            relatedTaskId: event.target.value,
+                          }))
+                        }
+                      >
+                        <option value="">
+                          {!friendPopupForm.recipientAccountId
+                            ? 'Choose a friend first'
+                            : isLoadingFriendPopupTasks
+                              ? 'Loading live tasks...'
+                              : 'General popup'}
+                        </option>
+                        {friendPopupTasks.map((task) => (
+                          <option key={task.id} value={task.id}>
+                            {task.title}
+                          </option>
+                        ))}
+                      </select>
+                      <FieldError message={friendFormErrors.popupTask} />
+                    </div>
+
+                    <div className="field">
                       <label htmlFor="friend-message">Message</label>
                       <textarea
                         id="friend-message"
                         value={friendPopupForm.message}
                         maxLength={4000}
+                        onKeyDown={submitFormOnEnter}
                         onChange={(event) =>
                           setFriendPopupForm((current) => ({
                             ...current,
@@ -5761,18 +6373,18 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
                       Send popup
                     </button>
                   </form>
-                </section>
+                </details>
                 ) : null}
 
                 {activeNetworkPanel === 'send' ? (
-                <section className="details-panel">
-                  <div className="panel-top">
+                <details className="details-panel collapsible-panel">
+                  <summary className="collapsible-summary">
                     <div>
                       <p className="section-kicker">Suggest task</p>
                       <h4>Send a task for a friend to accept or deny</h4>
                     </div>
                     <span className="status-chip muted">reviewed by them</span>
-                  </div>
+                  </summary>
 
                   <form className="composer-form" onSubmit={handleFriendTaskSuggestionSubmit}>
                     <div className="split-fields">
@@ -5832,6 +6444,7 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
                       <textarea
                         id="task-suggestion-notes"
                         value={friendTaskSuggestionForm.notes}
+                        onKeyDown={submitFormOnEnter}
                         onChange={(event) =>
                           setFriendTaskSuggestionForm((current) => ({
                             ...current,
@@ -5895,13 +6508,13 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
                       Send task suggestion
                     </button>
                   </form>
-                </section>
+                </details>
                 ) : null}
 
                 {activeNetworkPanel === 'send' ? (
                   <>
-                <section className="details-panel">
-                  <div className="panel-top">
+                <details className="details-panel collapsible-panel">
+                  <summary className="collapsible-summary">
                     <div>
                       <p className="section-kicker">Suggest edit</p>
                       <h4>Ask a friend to change one of their tasks</h4>
@@ -5911,7 +6524,7 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
                       </p>
                     </div>
                     <span className="status-chip muted">public tasks</span>
-                  </div>
+                  </summary>
 
                   <form className="composer-form" onSubmit={handleFriendTaskEditSuggestionSubmit}>
                     <div className="split-fields">
@@ -5953,7 +6566,7 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
                     </div>
 
                     <div className="field">
-                      <label htmlFor="task-edit-target">Public task to edit</label>
+                      <label htmlFor="task-edit-target">Public task or routine to edit</label>
                       <select
                         id="task-edit-target"
                         value={friendTaskEditSuggestionForm.publicTaskId}
@@ -5971,17 +6584,38 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
                               ...current,
                               publicTaskId: selectedTask?.id ?? '',
                               taskTitle: selectedTask?.title ?? '',
+                              suggestedTitle:
+                                selectedTask?.kind === 'routine'
+                                  ? selectedTask.title
+                                  : current.suggestedTitle,
+                              suggestedPriority:
+                                selectedTask?.kind === 'routine'
+                                  ? normalizeTaskPriority(selectedTask.priority as TaskPriority)
+                                  : current.suggestedPriority,
+                              suggestedRoutineStartDate:
+                                selectedTask?.kind === 'routine'
+                                  ? selectedTask.scheduledDate ?? toLocalDateString(new Date())
+                                  : current.suggestedRoutineStartDate,
+                              suggestedRoutineDueTime:
+                                selectedTask?.kind === 'routine' && selectedTask.dueAt
+                                  ? splitDateTimeValue(selectedTask.dueAt).time
+                                  : current.suggestedRoutineDueTime,
+                              suggestedRoutineReminderTime:
+                                selectedTask?.kind === 'routine' && selectedTask.reminderAt
+                                  ? splitDateTimeValue(selectedTask.reminderAt).time
+                                  : current.suggestedRoutineReminderTime,
                             }));
                           }
                         }
                       >
                         <option value="">
                           {isLoadingFriendPublicTasks
-                            ? 'Loading public tasks...'
-                            : 'Choose a public task'}
+                            ? 'Loading public items...'
+                            : 'Choose a public item'}
                         </option>
                         {friendPublicTasks.map((task) => (
                           <option key={task.id} value={task.id}>
+                            {task.kind === 'routine' ? 'Routine: ' : 'Task: '}
                             {task.title}
                           </option>
                         ))}
@@ -6032,6 +6666,7 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
                         id="task-edit-notes"
                         value={friendTaskEditSuggestionForm.suggestedNotes}
                         placeholder="Leave blank for no description change"
+                        onKeyDown={submitFormOnEnter}
                         onChange={(event) =>
                           setFriendTaskEditSuggestionForm((current) => ({
                             ...current,
@@ -6041,6 +6676,142 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
                       />
                     </div>
 
+                    {isSuggestingRoutineEdit ? (
+                      <div className="details-panel">
+                        <div className="quick-row routine-quick-row">
+                          <input
+                            className="small-input"
+                            type="number"
+                            min="1"
+                            step="1"
+                            value={friendTaskEditSuggestionForm.suggestedRoutineInterval}
+                            onChange={(event) =>
+                              setFriendTaskEditSuggestionForm((current) => ({
+                                ...current,
+                                suggestedRoutineInterval: event.target.value,
+                              }))
+                            }
+                          />
+                          <select
+                            className="small-input"
+                            value={friendTaskEditSuggestionForm.suggestedRoutineUnit}
+                            onChange={(event) => {
+                              const nextUnit = event.target.value as RoutineUnit;
+                              setFriendTaskEditSuggestionForm((current) => ({
+                                ...current,
+                                suggestedRoutineUnit: nextUnit,
+                                suggestedRoutineWeekdays:
+                                  nextUnit === 'week' && current.suggestedRoutineWeekdays.length === 0
+                                    ? [getWeekdayForDateString(current.suggestedRoutineStartDate)]
+                                    : current.suggestedRoutineWeekdays,
+                              }));
+                            }}
+                          >
+                            <option value="day">day</option>
+                            <option value="week">week</option>
+                            <option value="month">month</option>
+                          </select>
+                        </div>
+
+                        {friendTaskEditSuggestionForm.suggestedRoutineUnit === 'week' ? (
+                          <div className="weekday-grid">
+                            {WEEKDAY_ORDER.map((weekday) => {
+                              const isActive =
+                                friendTaskEditSuggestionForm.suggestedRoutineWeekdays.includes(
+                                  weekday,
+                                );
+
+                              return (
+                                <button
+                                  key={weekday}
+                                  className={`weekday-chip ${isActive ? 'is-active' : ''}`}
+                                  type="button"
+                                  onClick={() =>
+                                    setFriendTaskEditSuggestionForm((current) => ({
+                                      ...current,
+                                      suggestedRoutineWeekdays:
+                                        isActive && current.suggestedRoutineWeekdays.length === 1
+                                          ? current.suggestedRoutineWeekdays
+                                          : isActive
+                                          ? current.suggestedRoutineWeekdays.filter(
+                                              (value) => value !== weekday,
+                                            )
+                                          : [...current.suggestedRoutineWeekdays, weekday],
+                                    }))
+                                  }
+                                >
+                                  {WEEKDAY_LABELS[weekday]}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        ) : null}
+
+                        <div className="three-fields">
+                          <div className="field">
+                            <label htmlFor="routine-edit-start">Suggested start date</label>
+                            <input
+                              id="routine-edit-start"
+                              className="schedule-input"
+                              type="date"
+                              value={friendTaskEditSuggestionForm.suggestedRoutineStartDate}
+                              onChange={(event) =>
+                                setFriendTaskEditSuggestionForm((current) => ({
+                                  ...current,
+                                  suggestedRoutineStartDate: event.target.value,
+                                }))
+                              }
+                            />
+                          </div>
+                          <div className="field">
+                            <label htmlFor="routine-edit-end">Suggested end date</label>
+                            <input
+                              id="routine-edit-end"
+                              className="schedule-input"
+                              type="date"
+                              value={friendTaskEditSuggestionForm.suggestedRoutineEndDate}
+                              onChange={(event) =>
+                                setFriendTaskEditSuggestionForm((current) => ({
+                                  ...current,
+                                  suggestedRoutineEndDate: event.target.value,
+                                }))
+                              }
+                            />
+                          </div>
+                          <div className="field">
+                            <label htmlFor="routine-edit-due-time">Suggested due time</label>
+                            <input
+                              id="routine-edit-due-time"
+                              className="schedule-input"
+                              type="time"
+                              value={friendTaskEditSuggestionForm.suggestedRoutineDueTime}
+                              onChange={(event) =>
+                                setFriendTaskEditSuggestionForm((current) => ({
+                                  ...current,
+                                  suggestedRoutineDueTime: event.target.value,
+                                }))
+                              }
+                            />
+                          </div>
+                        </div>
+
+                        <div className="field">
+                          <label htmlFor="routine-edit-reminder-time">Suggested reminder time</label>
+                          <input
+                            id="routine-edit-reminder-time"
+                            className="schedule-input"
+                            type="time"
+                            value={friendTaskEditSuggestionForm.suggestedRoutineReminderTime}
+                            onChange={(event) =>
+                              setFriendTaskEditSuggestionForm((current) => ({
+                                ...current,
+                                suggestedRoutineReminderTime: event.target.value,
+                              }))
+                            }
+                          />
+                        </div>
+                      </div>
+                    ) : (
                     <div className="split-fields">
                       <div className="field">
                         <label htmlFor="task-edit-due-date">Suggested due date</label>
@@ -6071,29 +6842,13 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
                         />
                       </div>
                     </div>
+                    )}
 
                     <button className="soft-button primary" type="submit">
                       Send edit suggestion
                     </button>
                   </form>
-                </section>
-
-                <section className="details-panel">
-                  <div className="panel-top">
-                    <div>
-                      <p className="section-kicker">Later packaging</p>
-                      <h4>Startup mode belongs here when this becomes an exe</h4>
-                      <p className="field-hint">
-                        The toggle will be visible in this section once the app is packaged, but it
-                        is intentionally not active while running through VS Code.
-                      </p>
-                    </div>
-                    <span className="status-chip muted">exe step</span>
-                  </div>
-                  <button className="soft-button" type="button" disabled>
-                    Start app when I sign in
-                  </button>
-                </section>
+                </details>
                   </>
                 ) : null}
 
@@ -6102,49 +6857,43 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
                   <div className="panel-top">
                     <div>
                       <p className="section-kicker">Recent popups</p>
-                      <h4>Password-protected local history</h4>
+                      <h4>Local popup history</h4>
                       <p className="field-hint">
-                        Recent app-to-app events stay out of the normal workflow. Unlock this only
-                        when you want to inspect what happened.
+                        Dev builds can inspect recent app-to-app popup events without a password.
+                        User builds do not show this review history.
                       </p>
                     </div>
                     <span className="status-chip muted">{recentFriendEvents.length} stored</span>
                   </div>
 
-                  {!friendNetworkStatus?.hasRecentPopupPassword ? (
-                    <form className="composer-form" onSubmit={handleSetRecentPasswordSubmit}>
-                      <div className="field">
-                        <label htmlFor="new-recent-password">Create local password</label>
-                        <input
-                          id="new-recent-password"
-                          type="password"
-                          value={newRecentPopupPasswordDraft}
-                          onChange={(event) =>
-                            setNewRecentPopupPasswordDraft(event.target.value)
-                          }
-                        />
-                      </div>
-                      <button className="soft-button primary" type="submit">
-                        Protect recent popups
-                      </button>
-                    </form>
-                  ) : isRecentPopupsUnlocked ? (
+                  {isRecentPopupsVisible ? (
                     <div className="list-stack">
                       <div className="row-actions">
                         <button
                           className="soft-button"
                           type="button"
-                          onClick={() => setIsRecentPopupsUnlocked(false)}
+                          onClick={() => setIsRecentPopupsVisible(false)}
                         >
-                          Lock recent popups
+                          Hide recent popups
                         </button>
                       </div>
 
                       {recentFriendEvents.length === 0 ? (
                         <p className="empty-state">No app-to-app popup events yet.</p>
                       ) : (
-                        recentFriendEvents.slice(0, 20).map((popupEvent) => (
-                          <article key={popupEvent.id} className="history-row">
+                        recentFriendEvents.slice(0, 50).map((popupEvent) => {
+                          const senderLabel =
+                            popupEvent.senderName ??
+                            popupEvent.senderDisplayName ??
+                            popupEvent.source ??
+                            'Unknown sender';
+                          const recipientLabel =
+                            popupEvent.recipientAccountId === accountStatus?.session?.accountId
+                              ? `you (@${accountStatus.session.username})`
+                              : popupEvent.recipientAccountId;
+
+                          return (
+                            <article key={popupEvent.id} className="history-row">
                             <div>
                               <div className="row-title">
                                 {popupEvent.title ?? popupEvent.relatedTaskTitle ?? popupEvent.kind}
@@ -6153,6 +6902,14 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
                                 {formatDateTime(popupEvent.createdAt)} · {popupEvent.status}
                                 {popupEvent.senderName ? ` · ${popupEvent.senderName}` : ''}
                               </div>
+                              <p className="row-meta">
+                                From {senderLabel} to {recipientLabel}
+                              </p>
+                              {popupEvent.relatedTaskTitle ? (
+                                <p className="row-meta">
+                                  About task: {popupEvent.relatedTaskTitle}
+                                </p>
+                              ) : null}
                               <p className="row-note">{popupEvent.message}</p>
                             </div>
                             <span
@@ -6162,27 +6919,21 @@ function MainScreen({ themeSettings, onThemeChange }: MainScreenProps) {
                             >
                               {popupEvent.priority}
                             </span>
-                          </article>
-                        ))
+                            </article>
+                          );
+                        })
                       )}
                     </div>
                   ) : (
-                    <form className="composer-form" onSubmit={handleRecentPasswordSubmit}>
-                      <div className="field">
-                        <label htmlFor="recent-password">Unlock recent popups</label>
-                        <input
-                          id="recent-password"
-                          type="password"
-                          value={recentPopupPasswordDraft}
-                          onChange={(event) =>
-                            setRecentPopupPasswordDraft(event.target.value)
-                          }
-                        />
-                      </div>
-                      <button className="soft-button primary" type="submit">
-                        Unlock
+                    <div className="row-actions">
+                      <button
+                        className="soft-button primary"
+                        type="button"
+                        onClick={() => setIsRecentPopupsVisible(true)}
+                      >
+                        View recent popups
                       </button>
-                    </form>
+                    </div>
                   )}
                   </section>
                 ) : null}
@@ -6227,7 +6978,6 @@ function MiniWindowScreen() {
     createEmptyMiniComposer(),
   );
   const [showTimingOptions, setShowTimingOptions] = useState(false);
-  const [showLaterItems, setShowLaterItems] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -6433,10 +7183,10 @@ function MiniWindowScreen() {
     }
   };
 
-  const todayTasks = tasks.filter(isTaskForToday);
-  const todayRoutines = routines.filter(isRoutineForToday);
-  const laterTasks = tasks.filter(isTaskForLater);
-  const laterRoutines = routines.filter(isRoutineForLater);
+  const activeTasks = tasks.filter((task) => task.status === 'pending');
+  const activeRoutines = routines.filter(
+    (item) => item.currentOccurrence?.status === 'pending',
+  );
   const today = toLocalDateString(new Date());
   const completedTodayTasks = tasks.filter(
     (task) => task.status === 'completed' && getCompletedTaskDate(task) === today,
@@ -6487,18 +7237,12 @@ function MiniWindowScreen() {
     };
   };
   const activeItems = [
-    ...todayTasks.map((task) => {
+    ...activeTasks.map((task) => {
       return buildMiniTaskItem(task);
     }),
-    ...todayRoutines.map((item) => {
+    ...activeRoutines.map((item) => {
       return buildMiniRoutineItem(item);
     }),
-    ...(showLaterItems
-      ? [
-          ...laterTasks.map((task) => buildMiniTaskItem(task)),
-          ...laterRoutines.map((item) => buildMiniRoutineItem(item)),
-        ]
-      : []),
   ].sort((left, right) => {
     if (left.rank !== right.rank) {
       return left.rank - right.rank;
@@ -6510,7 +7254,6 @@ function MiniWindowScreen() {
 
     return left.title.localeCompare(right.title);
   });
-  const laterItemsCount = laterTasks.length + laterRoutines.length;
   const completedItems = [
     ...completedTodayTasks.map((task) => {
       const priorityDetails = getTaskPriorityDetails(task);
@@ -6805,17 +7548,6 @@ function MiniWindowScreen() {
           <div className="mini-section-head">
             <div className="mini-section-title">
               <h2>Active tasks</h2>
-              {laterItemsCount ? (
-                <button
-                  className="link-button mini-toggle-link"
-                  type="button"
-                  onClick={() => setShowLaterItems((current) => !current)}
-                >
-                  {showLaterItems
-                    ? `Hide later (${laterItemsCount})`
-                    : `Show later (${laterItemsCount})`}
-                </button>
-              ) : null}
             </div>
             <span className="status-chip accent">{activeItems.length}</span>
           </div>
@@ -6823,13 +7555,7 @@ function MiniWindowScreen() {
           {isLoading ? (
             <p className="empty-state">Loading active tasks...</p>
           ) : activeItems.length === 0 ? (
-            <p className="empty-state">
-              {laterItemsCount
-                ? `Nothing urgent right now. ${laterItemsCount} later item${
-                    laterItemsCount === 1 ? '' : 's'
-                  } ${showLaterItems ? 'is' : 'are'} ${showLaterItems ? 'already shown above.' : 'hidden for now.'}`
-                : 'Nothing active right now.'}
-            </p>
+            <p className="empty-state">Nothing active right now.</p>
           ) : (
             <div className="mini-list">
               {activeItems.map((item) => (

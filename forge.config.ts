@@ -25,10 +25,16 @@ const config: ForgeConfig = {
     asar: true,
     name: appVariant === 'user' ? 'To Do List' : 'To Do List Dev',
     executableName: appVariant === 'user' ? 'To Do List' : 'To Do List Dev',
+    icon: './assets/app-icon',
+    extraResource: ['./assets'],
   },
   rebuildConfig: {},
   makers: [
-    new MakerSquirrel({}),
+    new MakerSquirrel({
+      setupIcon: './assets/app-icon.ico',
+      loadingGif: './assets/installer-loading.gif',
+      iconUrl: 'https://raw.githubusercontent.com/Moniummo/to_do_list/main/assets/app-icon.ico',
+    }),
     new MakerZIP({}, ['darwin']),
     new MakerRpm({}),
     new MakerDeb({}),

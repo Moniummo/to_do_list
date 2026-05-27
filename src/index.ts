@@ -3,6 +3,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import {
   app,
+  autoUpdater,
   BrowserWindow,
   globalShortcut,
   ipcMain,
@@ -64,6 +65,8 @@ import type {
   AccountCredentials,
   AccountStatus,
   AppInfo,
+  AppStartupSettings,
+  AppUpdateCheckResult,
   AppDndMode,
   AppPopupDraft,
   AppPopupEvent,
@@ -126,7 +129,6 @@ type StoreAccess = {
 };
 
 const CURRENT_SCHEMA_VERSION = 3;
-const APP_USER_MODEL_ID = 'com.arkave.todolist';
 const APP_NAME = 'To Do List';
 const TODO_APP_VARIANT_ENV = 'TODO_APP_VARIANT';
 const TODO_PROFILE_ENV = 'TODO_PROFILE';
@@ -149,7 +151,6 @@ const SUPABASE_PRESENCE_DEVICE_ID_ENV = 'SUPABASE_PRESENCE_DEVICE_ID';
 const SUPABASE_PRESENCE_DEVICE_NAME_ENV = 'SUPABASE_PRESENCE_DEVICE_NAME';
 const WEBSITE_EMERGENCY_MESSAGE_SOURCE = 'website-emergency';
 const FRIEND_NETWORK_DND_MODE_KEY = 'friendNetworkDndMode';
-const FRIEND_NETWORK_RECENT_PASSWORD_KEY = 'friendNetworkRecentPopupPassword';
 const ACCOUNT_ID_KEY = 'syncAccountId';
 const ACCOUNT_USERNAME_KEY = 'syncAccountUsername';
 const ACCOUNT_DISPLAY_NAME_KEY = 'syncAccountDisplayName';
@@ -166,11 +167,106 @@ const getAppVariant = (): AppVariant =>
 
 const appVariant = getAppVariant();
 const isDevVariant = (): boolean => appVariant === 'dev';
+const WINDOWS_APP_USER_MODEL_ID =
+  appVariant === 'user'
+    ? 'com.squirrel.to_do_list.To Do List'
+    : 'com.squirrel.to_do_list.To Do List Dev';
 
 const getAppInfo = (): AppInfo => ({
   variant: appVariant,
   isDevVariant: isDevVariant(),
+  isPackaged: app.isPackaged,
 });
+
+const getStartupSettings = (): AppStartupSettings => {
+  const isSupported = app.isPackaged;
+
+  return {
+    isSupported,
+    openAtLogin: isSupported ? app.getLoginItemSettings().openAtLogin : false,
+  };
+};
+
+const setStartupEnabled = (enabled: boolean): AppStartupSettings => {
+  if (!app.isPackaged) {
+    return getStartupSettings();
+  }
+
+  app.setLoginItemSettings({
+    openAtLogin: enabled,
+    path: process.execPath,
+  });
+
+  return getStartupSettings();
+};
+
+const checkForUpdatesNow = (): Promise<AppUpdateCheckResult> => {
+  if (!app.isPackaged || appVariant !== 'user') {
+    return Promise.resolve({
+      isSupported: false,
+      status: 'unsupported',
+      message: 'Update checks only run from the installed user build.',
+    });
+  }
+
+  return new Promise((resolve) => {
+    let didFinish = false;
+    const finish = (result: AppUpdateCheckResult) => {
+      if (didFinish) {
+        return;
+      }
+
+      didFinish = true;
+      clearTimeout(timeoutId);
+      autoUpdater.removeListener('update-available', handleUpdateAvailable);
+      autoUpdater.removeListener('update-not-available', handleUpdateNotAvailable);
+      autoUpdater.removeListener('error', handleUpdateError);
+      resolve(result);
+    };
+
+    const handleUpdateAvailable = () => {
+      finish({
+        isSupported: true,
+        status: 'available',
+        message: 'Update found. The app will download it and prompt when it is ready.',
+      });
+    };
+
+    const handleUpdateNotAvailable = () => {
+      finish({
+        isSupported: true,
+        status: 'not_available',
+        message: 'You are already on the latest available release.',
+      });
+    };
+
+    const handleUpdateError = (error: Error) => {
+      finish({
+        isSupported: true,
+        status: 'error',
+        message: error.message || 'The update check failed.',
+      });
+    };
+
+    const timeoutId = setTimeout(() => {
+      finish({
+        isSupported: true,
+        status: 'timeout',
+        message: 'The update check is still pending. Try again in a moment.',
+      });
+    }, 15_000);
+
+    autoUpdater.once('update-available', handleUpdateAvailable);
+    autoUpdater.once('update-not-available', handleUpdateNotAvailable);
+    autoUpdater.once('error', handleUpdateError);
+
+    try {
+      autoUpdater.checkForUpdates();
+    } catch (error) {
+      handleUpdateError(error instanceof Error ? error : new Error(String(error)));
+    }
+  });
+};
 
 const startUserBuildAutoUpdates = (): void => {
   if (!app.isPackaged || appVariant !== 'user') {
@@ -202,8 +298,8 @@ const toStorageSafeProfileName = (value: string): string =>
 const localDevProfileName = getLocalDevProfileName();
 const localDevProfileStorageName = localDevProfileName
   ? toStorageSafeProfileName(localDevProfileName)
-  : appVariant === 'user'
-    ? 'user'
+  : app.isPackaged && appVariant === 'user'
+    ? 'public'
     : undefined;
 
 if (localDevProfileStorageName) {
@@ -211,6 +307,13 @@ if (localDevProfileStorageName) {
     'userData',
     path.join(app.getPath('appData'), `${APP_NAME}-${localDevProfileStorageName}`),
   );
+}
+
+// Take the lock after choosing userData so each profile has one allowed instance.
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+
+if (!hasSingleInstanceLock) {
+  app.quit();
 }
 
 const taskStore = new Store<Record<string, unknown>>({
@@ -259,7 +362,7 @@ let isAutoTimeBlockDndActive = false;
 let supabasePresenceServiceHeartbeat: (() => Promise<void>) | null = null;
 let supabasePresenceServiceStop: (() => Promise<void>) | null = null;
 
-app.setAppUserModelId(APP_USER_MODEL_ID);
+app.setAppUserModelId(WINDOWS_APP_USER_MODEL_ID);
 app.name = APP_NAME;
 
 const reminderFormatter = new Intl.DateTimeFormat(undefined, {
@@ -451,33 +554,6 @@ const syncTimeBlockDnd = (state: PersistedState, now: number): void => {
   }
 };
 
-const getRecentPopupPassword = (): string | undefined =>
-  getStoredStringValue(FRIEND_NETWORK_RECENT_PASSWORD_KEY);
-
-const hasRecentPopupPassword = (): boolean => Boolean(getRecentPopupPassword());
-
-const setRecentPopupPassword = (password: string): FriendNetworkStatus => {
-  const nextPassword = normalizeOptionalText(password);
-
-  if (!nextPassword) {
-    throw new Error('Please enter a password for recent popups.');
-  }
-
-  taskStoreAccess.set(FRIEND_NETWORK_RECENT_PASSWORD_KEY, nextPassword);
-  broadcastFriendNetworkChange();
-  return getFriendNetworkStatus();
-};
-
-const verifyRecentPopupPassword = (password: string): boolean => {
-  const currentPassword = getRecentPopupPassword();
-
-  if (!currentPassword) {
-    return false;
-  }
-
-  return password === currentPassword;
-};
-
 const getFriendNetworkStatus = (): FriendNetworkStatus => ({
   isConfigured: Boolean(supabaseFriendNetworkService),
   missingEnvKeys: supabaseFriendNetworkMissingEnvKeys,
@@ -486,7 +562,6 @@ const getFriendNetworkStatus = (): FriendNetworkStatus => ({
   accountUsername: getStoredAccountSession()?.username,
   dndMode: getAppDndMode(),
   profileName: localDevProfileName,
-  hasRecentPopupPassword: hasRecentPopupPassword(),
 });
 
 const requireSupabaseFriendNetworkService = (): SupabaseFriendNetworkService => {
@@ -529,6 +604,16 @@ const normalizeOptionalLocalDate = (value?: string | null): string | undefined =
 const normalizeOptionalLocalTime = (value?: string | null): string | undefined => {
   const trimmedValue = value?.trim();
   return trimmedValue ? trimmedValue : undefined;
+};
+
+const toLocalTimeString = (value: string): string => {
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    throw new Error('Please use a valid date and time.');
+  }
+
+  return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
 };
 
 const toLocalCompletionIso = (dateValue: string, existingIso?: string): string => {
@@ -792,6 +877,7 @@ const persistState = (
     supabaseSharedTaskService.scheduleSync({
       tasks: nextState.oneOffTasks,
       routines: buildRoutineListItems(nextState),
+      routineOccurrences: nextState.routineOccurrences,
     });
   }
 
@@ -962,11 +1048,21 @@ const getLiveState = (): PersistedState => {
   return nextState;
 };
 
-const isPlannerStateEmpty = (state: PersistedState): boolean =>
-  state.oneOffTasks.length === 0 &&
-  state.timeBlocks.length === 0 &&
-  state.routineTemplates.length === 0 &&
-  state.routineOccurrences.length === 0;
+const createEmptyPlannerState = (): PersistedState => ({
+  schemaVersion: CURRENT_SCHEMA_VERSION,
+  oneOffTasks: [],
+  timeBlocks: [],
+  routineTemplates: [],
+  routineOccurrences: [],
+  notifiedReminders: {},
+});
+
+const clearLocalPlannerState = (): void => {
+  persistState(createEmptyPlannerState(), {
+    broadcast: true,
+    syncRemote: false,
+  });
+};
 
 const getAccountSyncService = (): SupabaseAccountSyncService => {
   if (!supabaseAccountSyncService) {
@@ -2025,6 +2121,13 @@ const createTrayIcon = () => {
   });
 };
 
+const getPackagedAssetPath = (assetName: string): string =>
+  app.isPackaged
+    ? path.join(process.resourcesPath, 'assets', assetName)
+    : path.join(process.cwd(), 'assets', assetName);
+
+const getAppIconPath = (): string => getPackagedAssetPath('app-icon.ico');
+
 const flushSelection = (): void => {
   if (!mainWindow || mainWindow.isDestroyed() || !pendingSelection) {
     return;
@@ -2059,8 +2162,10 @@ const createMainWindow = (): BrowserWindow => {
     minWidth: 980,
     minHeight: 680,
     show: false,
+    autoHideMenuBar: true,
     backgroundColor: WINDOW_BACKGROUND,
     title: APP_NAME,
+    icon: getAppIconPath(),
     webPreferences: {
       preload: MAIN_WINDOW_PRELOAD_WEBPACK_ENTRY,
     },
@@ -2720,21 +2825,33 @@ const getFriendNetworkPopupBody = (event: AppPopupEvent): string =>
 
 const getFriendNetworkEventPopupPayload = (
   event: AppPopupEvent,
-): ReminderPopupPayload => ({
-  title: event.relatedTaskTitle ?? event.title ?? '',
-  body: getFriendNetworkPopupBody(event),
-  selection:
-    event.kind === 'task_submission' || event.kind === 'task_edit_suggestion'
-      ? friendNetworkSelection
-      : undefined,
-  contextLabel: getFriendNetworkEventLabel(event),
-  contextValue: formatFriendNetworkSenderLabel(event),
-  presentation:
-    event.kind === 'emergency_popup' || event.priority === 'emergency'
-      ? 'mega'
-      : 'standard',
-  sourceEventId: event.id,
-});
+): ReminderPopupPayload => {
+  const relatedTaskKind = getPayloadString(event.payload, 'taskKind');
+  const taskSelection =
+    event.relatedTaskId && (event.kind === 'task_popup' || event.kind === 'emergency_popup')
+      ? {
+          kind: relatedTaskKind === 'routine' ? 'routine' as const : 'task' as const,
+          id: event.relatedTaskId,
+        }
+      : undefined;
+
+  return {
+    title: event.relatedTaskTitle ?? event.title ?? '',
+    body: getFriendNetworkPopupBody(event),
+    selection:
+      taskSelection ??
+      (event.kind === 'task_submission' || event.kind === 'task_edit_suggestion'
+        ? friendNetworkSelection
+        : undefined),
+    contextLabel: getFriendNetworkEventLabel(event),
+    contextValue: formatFriendNetworkSenderLabel(event),
+    presentation:
+      event.kind === 'emergency_popup' || event.priority === 'emergency'
+        ? 'mega'
+        : 'standard',
+    sourceEventId: event.id,
+  };
+};
 
 const shouldDeferFriendNetworkEvent = (event: AppPopupEvent): boolean => {
   return shouldDeferPopupDelivery(event.priority === 'emergency');
@@ -2882,6 +2999,7 @@ const startSupabaseSharedTaskFeed = async (): Promise<void> => {
   await service.start({
     tasks: listTasks(),
     routines: listRoutines(),
+    routineOccurrences: getRoutineOccurrences(),
   });
 };
 
@@ -3144,15 +3262,7 @@ const completeAccountSignIn = async ({
   plannerStateUpdatedAt: string;
 }): Promise<AccountStatus> => {
   storeAccountSession(session);
-
-  const localState = getLiveState();
-
-  if (isPlannerStateEmpty(plannerState) && !isPlannerStateEmpty(localState)) {
-    const syncedAt = await getAccountSyncService().savePlannerState(session, localState);
-    updateAccountLastSyncedAt(syncedAt);
-  } else {
-    applyRemotePlannerState(plannerState, plannerStateUpdatedAt);
-  }
+  applyRemotePlannerState(plannerState, plannerStateUpdatedAt);
 
   await refreshSavedFriendContacts({ broadcast: true });
   await startSupabaseFriendNetworkFeed();
@@ -3164,7 +3274,10 @@ const completeAccountSignIn = async ({
 };
 
 const signUpAccount = async (credentials: AccountCredentials): Promise<AccountStatus> => {
-  const result = await getAccountSyncService().createAccount(credentials, getLiveState());
+  const result = await getAccountSyncService().createAccount(
+    credentials,
+    createEmptyPlannerState(),
+  );
   return completeAccountSignIn(result);
 };
 
@@ -3180,6 +3293,7 @@ const signOutAccount = (): AccountStatus => {
   }
 
   clearAccountSession();
+  clearLocalPlannerState();
   savedFriendContacts = [];
   hasLoadedSavedFriendContacts = false;
   restartAccountSyncPolling();
@@ -3239,13 +3353,14 @@ const listPublicTasksForFriend = async (
     return [];
   }
 
-  return (
+  const publicTasks =
     (await supabaseSharedTaskService?.listTasksVisibleToViewer(
       normalizedFriendAccountId,
       session.accountId,
       session.passwordHash,
-    )) ?? []
-  );
+    )) ?? [];
+
+  return publicTasks.filter((task) => task.status === 'pending');
 };
 
 const listPendingFriendNetworkEvents = async (): Promise<AppPopupEvent[]> =>
@@ -3347,6 +3462,60 @@ const getPayloadPriority = (
   return undefined;
 };
 
+const isRoutineUnit = (value: unknown): value is RoutineRule['unit'] =>
+  value === 'day' || value === 'week' || value === 'month';
+
+const isRoutineWeekday = (
+  value: unknown,
+): value is NonNullable<RoutineRule['weekdays']>[number] =>
+  value === 'sun' ||
+  value === 'mon' ||
+  value === 'tue' ||
+  value === 'wed' ||
+  value === 'thu' ||
+  value === 'fri' ||
+  value === 'sat';
+
+const getPayloadRoutineRule = (
+  payload: Record<string, unknown>,
+  key: string,
+): RoutineRule | undefined => {
+  const value = payload[key];
+
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return undefined;
+  }
+
+  const record = value as Record<string, unknown>;
+  const interval = Number(record.interval);
+  const unit = record.unit;
+  const startDate = record.startDate;
+
+  if (!Number.isFinite(interval) || !isRoutineUnit(unit) || typeof startDate !== 'string') {
+    return undefined;
+  }
+
+  const weekdays = Array.isArray(record.weekdays)
+    ? record.weekdays.filter(isRoutineWeekday)
+    : undefined;
+  const endDate =
+    typeof record.endDate === 'string' ? normalizeOptionalText(record.endDate) : undefined;
+  const dueTime =
+    typeof record.dueTime === 'string' ? normalizeOptionalText(record.dueTime) : undefined;
+  const reminderTime =
+    typeof record.reminderTime === 'string' ? normalizeOptionalText(record.reminderTime) : undefined;
+
+  return {
+    interval,
+    unit,
+    weekdays: unit === 'week' ? weekdays : undefined,
+    startDate,
+    endDate,
+    dueTime,
+    reminderTime,
+  };
+};
+
 const getFriendNetworkEventById = async (eventId: string): Promise<AppPopupEvent> => {
   const event = (await listPendingFriendNetworkEvents()).find(
     (candidate) => candidate.id === eventId,
@@ -3379,40 +3548,76 @@ const buildFriendTaskSubmissionDraft = (event: AppPopupEvent): TaskDraft => {
   };
 };
 
-const findFriendEditTargetTask = (event: AppPopupEvent): Task => {
+type FriendEditTarget =
+  | {
+      kind: 'task';
+      item: Task;
+    }
+  | {
+      kind: 'routine';
+      item: RoutineTemplate;
+    };
+
+const findFriendEditTarget = (event: AppPopupEvent): FriendEditTarget => {
   const state = getLiveState();
-  const taskId = event.relatedTaskId ?? getPayloadString(event.payload, 'taskId');
+  const targetKind = getPayloadString(event.payload, 'taskKind') === 'routine'
+    ? 'routine'
+    : 'task';
+  const targetId = event.relatedTaskId ?? getPayloadString(event.payload, 'taskId');
 
-  if (taskId) {
-    const task = state.oneOffTasks.find((candidate) => candidate.id === taskId);
+  if (targetId) {
+    if (targetKind === 'routine') {
+      const routine = state.routineTemplates.find((candidate) => candidate.id === targetId);
 
-    if (task) {
-      return task;
+      if (routine) {
+        return {
+          kind: 'routine',
+          item: routine,
+        };
+      }
+    } else {
+      const task = state.oneOffTasks.find((candidate) => candidate.id === targetId);
+
+      if (task) {
+        return {
+          kind: 'task',
+          item: task,
+        };
+      }
     }
   }
 
-  const taskTitle = normalizeOptionalText(
+  const targetTitle = normalizeOptionalText(
     event.relatedTaskTitle ?? getPayloadString(event.payload, 'taskTitle') ?? event.title,
   );
 
-  if (!taskTitle) {
-    throw new Error('This edit suggestion does not include a target task title.');
+  if (!targetTitle) {
+    throw new Error('This edit suggestion does not include a target title.');
   }
 
-  const normalizedTaskTitle = taskTitle.toLowerCase();
-  const matches = state.oneOffTasks.filter(
-    (task) => task.title.trim().toLowerCase() === normalizedTaskTitle,
-  );
+  const normalizedTargetTitle = targetTitle.toLowerCase();
+  const matches =
+    targetKind === 'routine'
+      ? state.routineTemplates.filter(
+          (routine) => routine.title.trim().toLowerCase() === normalizedTargetTitle,
+        )
+      : state.oneOffTasks.filter(
+          (task) => task.title.trim().toLowerCase() === normalizedTargetTitle,
+        );
 
   if (matches.length !== 1) {
+    const targetLabel = targetKind === 'routine' ? 'routine' : 'task';
     throw new Error(
       matches.length === 0
-        ? `No local task matched "${taskTitle}".`
-        : `More than one local task matched "${taskTitle}". Rename one or dismiss this suggestion.`,
+        ? `No local ${targetLabel} matched "${targetTitle}".`
+        : `More than one local ${targetLabel} matched "${targetTitle}". Rename one or dismiss this suggestion.`,
     );
   }
 
-  return matches[0];
+  return {
+    kind: targetKind,
+    item: matches[0],
+  } as FriendEditTarget;
 };
 
 const buildFriendTaskEditUpdate = (event: AppPopupEvent, task: Task): TaskUpdate => {
@@ -3453,6 +3658,58 @@ const buildFriendTaskEditUpdate = (event: AppPopupEvent, task: Task): TaskUpdate
   return update;
 };
 
+const buildFriendRoutineEditUpdate = (
+  event: AppPopupEvent,
+  routine: RoutineTemplate,
+): RoutineUpdate => {
+  const payload = event.payload;
+  const update: RoutineUpdate = {
+    id: routine.id,
+  };
+  const suggestedTitle = getPayloadString(payload, 'suggestedTitle');
+  const suggestedNotes = getPayloadString(payload, 'suggestedNotes');
+  const suggestedDueAt = getPayloadString(payload, 'suggestedDueAt');
+  const suggestedReminderAt = getPayloadString(payload, 'suggestedReminderAt');
+  const suggestedPriority = getPayloadPriority(payload, 'suggestedPriority');
+  const suggestedRoutineRule = getPayloadRoutineRule(payload, 'suggestedRoutineRule');
+  const nextRule: RoutineRule = {
+    ...(suggestedRoutineRule ?? routine.rule),
+  };
+  let didChangeRule = Boolean(suggestedRoutineRule);
+
+  if (suggestedTitle) {
+    update.title = suggestedTitle;
+  }
+
+  if (suggestedNotes) {
+    update.notes = suggestedNotes;
+  }
+
+  if (suggestedDueAt) {
+    nextRule.dueTime = toLocalTimeString(suggestedDueAt);
+    didChangeRule = true;
+  }
+
+  if (suggestedReminderAt) {
+    nextRule.reminderTime = toLocalTimeString(suggestedReminderAt);
+    didChangeRule = true;
+  }
+
+  if (suggestedPriority) {
+    update.priority = suggestedPriority;
+  }
+
+  if (didChangeRule) {
+    update.rule = nextRule;
+  }
+
+  if (Object.keys(update).length === 1) {
+    throw new Error('This edit suggestion does not include any changes.');
+  }
+
+  return update;
+};
+
 const acceptFriendNetworkEvent = async (eventId: string): Promise<AppPopupEvent[]> => {
   const service = requireSupabaseFriendNetworkService();
   const event = await getFriendNetworkEventById(eventId);
@@ -3467,24 +3724,47 @@ const acceptFriendNetworkEvent = async (eventId: string): Promise<AppPopupEvent[
       throw error;
     }
   } else if (event.kind === 'task_edit_suggestion') {
-    const targetTask = findFriendEditTargetTask(event);
-    const rollbackPayload: TaskUpdate = {
-      id: targetTask.id,
-      title: targetTask.title,
-      dueAt: targetTask.dueAt ?? null,
-      reminderAt: targetTask.reminderAt ?? null,
-      notes: targetTask.notes ?? null,
-      priority: targetTask.priority ?? 'auto',
-    };
-    const updatePayload = buildFriendTaskEditUpdate(event, targetTask);
+    const target = findFriendEditTarget(event);
 
-    updateTask(updatePayload);
+    if (target.kind === 'routine') {
+      const targetRoutine = target.item;
+      const rollbackPayload: RoutineUpdate = {
+        id: targetRoutine.id,
+        title: targetRoutine.title,
+        notes: targetRoutine.notes ?? null,
+        priority: targetRoutine.priority ?? 'auto',
+        rule: targetRoutine.rule,
+      };
+      const updatePayload = buildFriendRoutineEditUpdate(event, targetRoutine);
 
-    try {
-      await service.updateStatus(event.id, 'accepted');
-    } catch (error) {
-      updateTask(rollbackPayload);
-      throw error;
+      updateRoutine(updatePayload);
+
+      try {
+        await service.updateStatus(event.id, 'accepted');
+      } catch (error) {
+        updateRoutine(rollbackPayload);
+        throw error;
+      }
+    } else {
+      const targetTask = target.item;
+      const rollbackPayload: TaskUpdate = {
+        id: targetTask.id,
+        title: targetTask.title,
+        dueAt: targetTask.dueAt ?? null,
+        reminderAt: targetTask.reminderAt ?? null,
+        notes: targetTask.notes ?? null,
+        priority: targetTask.priority ?? 'auto',
+      };
+      const updatePayload = buildFriendTaskEditUpdate(event, targetTask);
+
+      updateTask(updatePayload);
+
+      try {
+        await service.updateStatus(event.id, 'accepted');
+      } catch (error) {
+        updateTask(rollbackPayload);
+        throw error;
+      }
     }
   } else {
     await service.updateStatus(event.id, 'opened');
@@ -3616,14 +3896,12 @@ ipcMain.handle('friendNetwork:acceptEvent', (_event, eventId: string) =>
 ipcMain.handle('friendNetwork:denyEvent', (_event, eventId: string) =>
   denyFriendNetworkEvent(eventId),
 );
-ipcMain.handle('friendNetwork:setRecentPopupPassword', (_event, password: string) =>
-  setRecentPopupPassword(password),
-);
-ipcMain.handle('friendNetwork:verifyRecentPopupPassword', (_event, password: string) =>
-  verifyRecentPopupPassword(password),
-);
-
 ipcMain.handle('app:info', () => getAppInfo());
+ipcMain.handle('app:getStartupSettings', () => getStartupSettings());
+ipcMain.handle('app:setStartupEnabled', (_event, enabled: boolean) =>
+  setStartupEnabled(Boolean(enabled)),
+);
+ipcMain.handle('app:checkForUpdates', () => checkForUpdatesNow());
 ipcMain.handle('app:show', () => {
   showMainWindow();
 });
@@ -3656,6 +3934,10 @@ app.on('before-quit', () => {
 });
 
 app.on('activate', () => {
+  showMainWindow();
+});
+
+app.on('second-instance', () => {
   showMainWindow();
 });
 
@@ -3723,6 +4005,7 @@ app.on('window-all-closed', () => {
 
 void app.whenReady().then(async () => {
   startUserBuildAutoUpdates();
+  Menu.setApplicationMenu(null);
   mainWindow = createMainWindow();
   createTray();
   registerShortcuts();

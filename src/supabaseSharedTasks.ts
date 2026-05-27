@@ -4,8 +4,14 @@ import {
   getSupabasePublishableKey,
   getSupabaseUrl,
 } from './buildConfig';
-import { formatRoutineRule } from './recurrence';
-import type { AppSelection, PublicSharedTask, RoutineListItem, Task } from './types';
+import { formatRoutineRule, toLocalDateString } from './recurrence';
+import type {
+  AppSelection,
+  PublicSharedTask,
+  RoutineListItem,
+  RoutineOccurrence,
+  Task,
+} from './types';
 
 const SUPABASE_SHARED_TASKS_TABLE_ENV = 'SUPABASE_SHARED_TASKS_TABLE';
 const DEFAULT_SUPABASE_SHARED_TASKS_TABLE = 'shared_tasks';
@@ -18,9 +24,10 @@ type SupabaseSharedTaskPayload = {
   kind: SharedTaskKind;
   source_id: string;
   title: string;
-  status: 'pending';
+  status: 'pending' | 'completed';
   due_at: string | null;
   reminder_at: string | null;
+  completed_at: string | null;
   scheduled_date: string | null;
   priority: string | null;
   rule_summary: string | null;
@@ -31,9 +38,18 @@ type SupabaseSharedTaskRow = SupabaseSharedTaskPayload & {
   updated_at: string;
 };
 
+type SupabaseDeleteResult = {
+  error: unknown;
+};
+
+type SupabaseDeleteFilterBuilder = PromiseLike<SupabaseDeleteResult> & {
+  eq: (column: string, value: string) => SupabaseDeleteFilterBuilder;
+};
+
 type SupabaseSharedTaskSnapshot = {
   tasks: Task[];
   routines: RoutineListItem[];
+  routineOccurrences?: RoutineOccurrence[];
 };
 
 type SupabaseSharedTaskServiceOptions = {
@@ -66,6 +82,9 @@ export type SupabaseSharedTaskService = {
 export const getSharedTaskId = (selection: AppSelection): string =>
   `${selection.kind}:${selection.id}`;
 
+const getCompletedRoutineSharedTaskId = (occurrenceId: string): string =>
+  `routine-completed:${occurrenceId}`;
+
 export const getSelectionFromSharedTaskId = (
   sharedTaskId?: string | null,
 ): AppSelection | undefined => {
@@ -97,9 +116,21 @@ const buildSharedTaskPayloads = ({
   accountId,
   tasks,
   routines,
+  routineOccurrences = [],
 }: SupabaseSharedTaskSnapshot & { accountId: string }): SupabaseSharedTaskPayload[] => {
+  const today = toLocalDateString(new Date());
   const taskPayloads = tasks
-    .filter((task) => task.status === 'pending')
+    .filter((task) => {
+      if (task.status === 'pending') {
+        return true;
+      }
+
+      return (
+        task.status === 'completed' &&
+        task.completedAt !== undefined &&
+        toLocalDateString(new Date(task.completedAt)) === today
+      );
+    })
     .map((task) => ({
       owner_account_id: accountId,
       task_id: getSharedTaskId({
@@ -109,16 +140,17 @@ const buildSharedTaskPayloads = ({
       kind: 'task' as const,
       source_id: task.id,
       title: task.title,
-      status: 'pending' as const,
+      status: task.status === 'completed' ? 'completed' as const : 'pending' as const,
       due_at: task.dueAt ?? null,
       reminder_at: task.reminderAt ?? null,
+      completed_at: task.completedAt ?? null,
       scheduled_date: null,
       priority: task.priority ?? null,
       rule_summary: null,
       visibility: task.visibility === 'private' ? 'private' as const : 'public' as const,
     }));
 
-  const routinePayloads = routines
+  const activeRoutinePayloads = routines
     .filter(
       (item) =>
         item.currentOccurrence !== undefined && item.currentOccurrence.status === 'pending',
@@ -135,13 +167,43 @@ const buildSharedTaskPayloads = ({
       status: 'pending' as const,
       due_at: item.currentOccurrence?.dueAt ?? null,
       reminder_at: item.currentOccurrence?.reminderAt ?? null,
+      completed_at: null,
       scheduled_date: item.currentOccurrence?.scheduledDate ?? null,
       priority: item.template.priority ?? null,
       rule_summary: formatRoutineRule(item.template.rule),
       visibility: 'public' as const,
     }));
 
-  return [...taskPayloads, ...routinePayloads].sort((left, right) =>
+  const routinesById = new Map(routines.map((item) => [item.template.id, item]));
+  const completedRoutinePayloads = routineOccurrences
+    .filter(
+      (occurrence) =>
+        occurrence.status === 'completed' &&
+        occurrence.completedAt !== undefined &&
+        toLocalDateString(new Date(occurrence.completedAt)) === today &&
+        routinesById.has(occurrence.routineId),
+    )
+    .map((occurrence) => {
+      const item = routinesById.get(occurrence.routineId) as RoutineListItem;
+
+      return {
+        owner_account_id: accountId,
+        task_id: getCompletedRoutineSharedTaskId(occurrence.id),
+        kind: 'routine' as const,
+        source_id: item.template.id,
+        title: item.template.title,
+        status: 'completed' as const,
+        due_at: occurrence.dueAt,
+        reminder_at: occurrence.reminderAt ?? null,
+        completed_at: occurrence.completedAt ?? null,
+        scheduled_date: occurrence.scheduledDate,
+        priority: item.template.priority ?? null,
+        rule_summary: formatRoutineRule(item.template.rule),
+        visibility: 'public' as const,
+      };
+    });
+
+  return [...taskPayloads, ...activeRoutinePayloads, ...completedRoutinePayloads].sort((left, right) =>
     left.task_id.localeCompare(right.task_id),
   );
 };
@@ -179,7 +241,6 @@ export const createSupabaseSharedTaskService = ({
   );
 
   const sharedTasksTable = getSharedTasksTableName();
-  let knownRemoteTaskIds: Set<string> | null = null;
   let lastSnapshotSignature: string | null = null;
   let queuedSnapshot: SupabaseSharedTaskSnapshot | null = null;
   let isSyncing = false;
@@ -191,46 +252,14 @@ export const createSupabaseSharedTaskService = ({
     title: row.title,
     dueAt: row.due_at ?? undefined,
     reminderAt: row.reminder_at ?? undefined,
+    completedAt: row.completed_at ?? undefined,
     scheduledDate: row.scheduled_date ?? undefined,
     priority: row.priority ?? undefined,
+    status: row.status === 'completed' ? 'completed' : 'pending',
     ruleSummary: row.rule_summary ?? undefined,
     visibility: row.visibility === 'private' ? 'private' : 'public',
     updatedAt: row.updated_at,
   });
-
-  const loadRemoteTaskIds = async (): Promise<Set<string>> => {
-    if (!accountId) {
-      return new Set<string>();
-    }
-
-    const { data, error } = await supabase
-      .from(sharedTasksTable)
-      .select('task_id')
-      .eq('owner_account_id', accountId)
-      .limit(500);
-
-    if (error) {
-      onError('Supabase shared task IDs could not be loaded.', error);
-      return new Set<string>();
-    }
-
-    return new Set(
-      (data ?? [])
-        .map((row) => {
-          if (
-            typeof row === 'object' &&
-            row !== null &&
-            'task_id' in row &&
-            typeof (row as { task_id?: unknown }).task_id === 'string'
-          ) {
-            return (row as { task_id: string }).task_id;
-          }
-
-          return null;
-        })
-        .filter((value): value is string => Boolean(value)),
-    );
-  };
 
   const syncSnapshot = async (snapshot: SupabaseSharedTaskSnapshot): Promise<void> => {
     if (!accountId) {
@@ -253,6 +282,16 @@ export const createSupabaseSharedTaskService = ({
       updated_at: syncTimestamp,
     }));
 
+    const deleteQuery = supabase
+      .from(sharedTasksTable)
+      .delete() as unknown as SupabaseDeleteFilterBuilder;
+    const { error: deleteError } = await deleteQuery.eq('owner_account_id', accountId);
+
+    if (deleteError) {
+      onError('Supabase shared tasks could not be refreshed.', deleteError);
+      return;
+    }
+
     if (rows.length > 0) {
       const { error } = await supabase.from(sharedTasksTable).upsert(rows, {
         onConflict: 'owner_account_id,task_id',
@@ -264,26 +303,6 @@ export const createSupabaseSharedTaskService = ({
       }
     }
 
-    if (knownRemoteTaskIds === null) {
-      knownRemoteTaskIds = await loadRemoteTaskIds();
-    }
-
-    const nextTaskIds = new Set(rows.map((row) => row.task_id));
-    const staleTaskIds = [...knownRemoteTaskIds].filter((taskId) => !nextTaskIds.has(taskId));
-
-    if (staleTaskIds.length > 0) {
-      const { error } = await supabase
-        .from(sharedTasksTable)
-        .delete()
-        .in('task_id', staleTaskIds);
-
-      if (error) {
-        onError('Supabase stale shared tasks could not be removed.', error);
-        return;
-      }
-    }
-
-    knownRemoteTaskIds = nextTaskIds;
     lastSnapshotSignature = signature;
   };
 

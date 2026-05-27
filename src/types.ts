@@ -267,6 +267,18 @@ export type AppVariant = 'dev' | 'user';
 export interface AppInfo {
   variant: AppVariant;
   isDevVariant: boolean;
+  isPackaged: boolean;
+}
+
+export interface AppStartupSettings {
+  isSupported: boolean;
+  openAtLogin: boolean;
+}
+
+export interface AppUpdateCheckResult {
+  isSupported: boolean;
+  status: 'unsupported' | 'checking' | 'available' | 'not_available' | 'error' | 'timeout';
+  message: string;
 }
 
 export interface AccountCredentials {
@@ -314,7 +326,6 @@ export interface FriendNetworkStatus {
   deviceName?: string;
   dndMode: AppDndMode;
   profileName?: string;
-  hasRecentPopupPassword: boolean;
   accountUsername?: string;
 }
 
@@ -340,8 +351,10 @@ export interface PublicSharedTask {
   kind: 'task' | 'routine';
   sourceId: string;
   title: string;
+  status: 'pending' | 'completed';
   dueAt?: string;
   reminderAt?: string;
+  completedAt?: string;
   scheduledDate?: string;
   priority?: string;
   ruleSummary?: string;
@@ -449,12 +462,13 @@ export interface TodoAppApi {
     sendPopup: (input: AppPopupDraft) => Promise<void>;
     acceptEvent: (id: string) => Promise<AppPopupEvent[]>;
     denyEvent: (id: string) => Promise<AppPopupEvent[]>;
-    setRecentPopupPassword: (password: string) => Promise<FriendNetworkStatus>;
-    verifyRecentPopupPassword: (password: string) => Promise<boolean>;
     onChanged: (listener: () => void) => () => void;
   };
   app: {
     info: () => Promise<AppInfo>;
+    getStartupSettings: () => Promise<AppStartupSettings>;
+    setStartupEnabled: (enabled: boolean) => Promise<AppStartupSettings>;
+    checkForUpdates: () => Promise<AppUpdateCheckResult>;
     show: () => Promise<void>;
     showSelection: (selection: AppSelection) => Promise<void>;
     closeCurrentWindow: (reason?: PopupCloseReason) => Promise<void>;
